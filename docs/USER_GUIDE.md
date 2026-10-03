@@ -192,6 +192,11 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   game runs. *Time* offers day, dusk and night as hours of this map and this date, worked out
   from where the sun actually stands, so a northern map's dusk in December is not its dusk in
   June. Both set the same time and weather the Drive page's *Day & weather* step sets.
+  Unlike that page's card, this one draws the weather whole, as the game draws it: fog at the
+  file's own visibility, the wet sheen of a rained-on bus, the light snow throws back, and the
+  bus's own scripts told what is falling, so the drop film comes onto its windows. (The
+  picture is still drawn on one fixed path, so the Enhanced renderer's own effects are not
+  shown here.)
 * **Setup** - where the original installation and the game binary are. The OMSI 2 folder may
   be given as a path with quotes, as `Omsi.exe` itself or as a folder inside it; unpacked into
   the OMSI 2 folder itself, openOMSI keeps its own content in an `openOMSI` folder there and

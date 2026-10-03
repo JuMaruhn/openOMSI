@@ -25,6 +25,12 @@ pub struct Look {
     /// Minutes of the day, and the date.
     pub time: i32,
     pub date: String,
+    /// Draw the weather as the game draws it: fog at the file's visibility, the wet sheen
+    /// and the light snow throws back, and the bus's own scripts told what is falling (the
+    /// drop film on its windows). The Drive page's card leaves this off and keeps the plain
+    /// picture it has always had; the Vehicle Editor, which is there to look at exactly
+    /// these things, asks for it.
+    pub effects: bool,
 }
 
 struct Ready {
@@ -185,7 +191,12 @@ impl Showroom {
                         let args = args_for(&w);
                         s.weather = load_weather(&args);
                         setup_sky(&args, renderer, &mut s.scene, omsi_content::Envir::load(&args.root.join("envir.cfg")).ok().as_ref(), Some(&s.weather));
-                        s.lighting = lighting_for(&args, &s.weather);
+                        s.lighting = lighting_for(&args, &s.weather, w.effects);
+                        if w.effects {
+                            if let Some(v) = s.vehicle.as_mut() {
+                                weather_to_scripts(v, &s.weather);
+                            }
+                        }
                     }
                     self.dirty = true;
                 } else {
@@ -285,6 +296,9 @@ impl Showroom {
         for t in vehicle.trailers.iter_mut() {
             t.init_text_textures(&mut world.fonts.lock(), &|p| omsi_texture::decode_file(p).ok().map(|i| (i.width, i.height, i.rgba)));
         }
+        if r.look.effects {
+            weather_to_scripts(&mut vehicle, &weather);
+        }
         vehicle.update(1.0 / 30.0);
         // the bus's size from its bounding box (with the rear section behind it)
         let bb = r.vt.def.bounding_box.unwrap_or([2.5, 12.0, 3.0, 0.0, 0.0, 1.5]);
@@ -297,7 +311,7 @@ impl Showroom {
             centre.y = bb[4] + bb[1] * 0.5 - total * 0.5;
             length = total;
         }
-        let lighting = lighting_for(&args, &weather);
+        let lighting = lighting_for(&args, &weather, r.look.effects);
         log::info!("showroom: {} ({} meshes, {:.1} m long) placed in {:.2} s", r.look.bus, render.instances.len(), length, t0.elapsed().as_secs_f64());
         Shown { look: r.look, scene, world: Some(world), vehicle: Some(vehicle), render: Some(render), trailers, centre, length, weather, lighting }
     }
@@ -369,19 +383,38 @@ impl Showroom {
 /// The light of the look's time and weather, with the sun's shadow under the bus. Always
 /// the plain renderer, whatever the game's graphics setting: a preview is to be quick and
 /// clear, not the game's picture (no enhanced exposure and glow, no weather effects).
-fn lighting_for(args: &Args, weather: &omsi_content::weather::Weather) -> Lighting {
+/// The light of the chosen time and weather. `weather_lighting` is the game's own, so what
+/// comes back is already right; without `effects` the three the plain card never drew are
+/// taken out again (`wetness`, `snow`, `fog_density`) - a thumbnail of a bus in 75 m of
+/// ground fog would be a grey square.
+fn lighting_for(args: &Args, weather: &omsi_content::weather::Weather, effects: bool) -> Lighting {
     let clock = start_clock(args);
     let envir = omsi_content::Envir::load(&args.root.join("envir.cfg")).ok();
     let daylight = omsi_sim::Daylight::compute(&clock, envir.as_ref());
-    let mut l = weather_lighting(&daylight, weather, crate::weather_setup::cloud_drift_at(weather, clock.time), 0.0, true);
+    let wetness = if effects { crate::weather_setup::initial_wetness(weather) } else { 0.0 };
+    let mut l = weather_lighting(&daylight, weather, crate::weather_setup::cloud_drift_at(weather, clock.time), wetness, true);
     l.shadows = daylight.altitude_deg > 2.0;
+    // the showroom draws on one path whatever the settings say, here as before
     l.enhanced = false;
     l.classic = false;
     l.detail = false;
-    l.wetness = 0.0;
-    l.snow = 0.0;
-    l.fog_density = 0.0;
+    if !effects {
+        l.wetness = 0.0;
+        l.snow = 0.0;
+        l.fog_density = 0.0;
+    }
     l
+}
+
+/// Tell the bus's scripts what the weather is doing, as the game tells them
+/// (`weather_setup::apply_weather`): the precipitation type and rate, the state of the road
+/// and the air. A few frames let them settle on it - the drop film on the windows builds up
+/// over time rather than appearing at once.
+fn weather_to_scripts(vehicle: &mut omsi_sim::VehicleInstance, weather: &omsi_content::weather::Weather) {
+    crate::weather_setup::apply_weather(vehicle, weather, crate::weather_setup::initial_wetness(weather));
+    for _ in 0..3 {
+        vehicle.update(1.0 / 30.0);
+    }
 }
 
 /// A round showroom floor under the bus: dark, matt, catching its shadow.
@@ -405,4 +438,33 @@ fn add_floor(renderer: &Renderer, scene: &mut Scene) {
     let mesh = renderer.add_mesh(scene, &data);
     let mat = renderer.add_material(scene, None, omsi_render::AlphaMode::Opaque, [0.12, 0.125, 0.135, 1.0], false);
     renderer.add_instance(scene, mesh, DVec3::new(0.0, 0.0, -0.005), glam::Mat4::IDENTITY, vec![mat]);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The weather a file asks for reaches the picture only where the page wants it: the
+    /// Vehicle Editor is there to look at fog, rain and snow, the Drive page's card is a
+    /// thumbnail and keeps the plain light it has always had.
+    #[test]
+    fn only_a_page_that_asks_for_them_gets_fog_wet_and_snow() {
+        let args = crate::cli::Args::parse_from(["openomsi"]);
+        // heavy snow at 120 m: falling, lying, and the air thick with it
+        let mut w = omsi_content::weather::Weather { snow: true, ..Default::default() };
+        w.fog.0 = 120.0;
+        w.precip = vec![2.0, 200.0];
+        w.ground_wet[0] = 180.0;
+
+        let plain = lighting_for(&args, &w, false);
+        assert_eq!((plain.fog_density, plain.wetness, plain.snow), (0.0, 0.0, 0.0), "the card draws none of them");
+
+        let full = lighting_for(&args, &w, true);
+        assert!(full.fog_density > 0.0, "120 m of visibility is fog");
+        assert!(full.wetness > 0.0, "a wet road is wet");
+        assert!(full.snow > 0.0, "snow lies");
+        // the rest is the same light either way: only those three are held back
+        assert_eq!(plain.sun_intensity, full.sun_intensity);
+        assert_eq!(plain.shadows, full.shadows);
+    }
 }
