@@ -36,11 +36,13 @@ const MODES: [(&str, &str); 3] = [("vanilla", "Vanilla (as OMSI 2)"), ("vanilla_
 /// find their game changed afterwards.
 pub struct EditorView {
     pub graphics: String,
+    /// How far the wipers have cleared their part of the panes (0..1, 1 = swept clean).
+    pub wiped: f32,
 }
 
 impl Default for EditorView {
     fn default() -> Self {
-        EditorView { graphics: core::graphics_mode(&crate::settings::Settings::load().graphics).to_string() }
+        EditorView { graphics: core::graphics_mode(&crate::settings::Settings::load().graphics).to_string(), wiped: 1.0 }
     }
 }
 
@@ -53,7 +55,7 @@ pub fn draw(l: &mut Launcher, r: Rect) {
     let h = r.h.min(l.ui.size.y - r.y - 24.0).max(200.0);
     let page = Rect::new(r.x, r.y, r.w, h);
     // the panel is told before the picture is drawn, so a drag on it never turns the bus
-    let rows = 3.0;
+    let rows = 4.0;
     let panel = Rect::new(
         page.right() - PANEL_PAD - PANEL_W,
         page.y + PANEL_PAD,
@@ -77,6 +79,25 @@ fn buttons(l: &mut Launcher, panel: Rect) {
     time(l, Rect::new(x, y, w, BUTTON_H));
     y += BUTTON_H + 8.0;
     graphics(l, Rect::new(x, y, w, BUTTON_H));
+    y += BUTTON_H + 8.0;
+    wipers(l, Rect::new(x, y, w, BUTTON_H));
+}
+
+/// The wiped area: how much of the water the wipers have taken off their part of the panes.
+///
+/// `Rain_Window_Wiped_Wetness` is what the stock `wiper.osc` works on - each sweep takes
+/// `|Rain_Wiper_Pos - Rain_Wiper_Pos_Prev| * rain_wiper_eff` off it, down to 0 - and the
+/// slider stands it anywhere between swept clean and as wet as the rest of the glass. The
+/// note under it is the curve that makes it visible: the layer is drawn at
+/// `min(1, wetness * 1.8)` (`omsi_sim::vehicle`), so it is already fully opaque at a wetness
+/// of 0.56 and the top of the slider's travel shows no further change.
+fn wipers(l: &mut Launcher, r: Rect) {
+    let mut percent = l.editor.wiped * 100.0;
+    let wet = (1.0 - l.editor.wiped) * l.showroom.wetness();
+    let note = format!("{} {:.0} %", omsi_ui::tr("Layer opacity"), (wet * 1.8).min(1.0) * 100.0);
+    if l.ui.menu_slider("editor-wipers", r, "Wiped area", &mut percent, 0.0, 100.0, 1.0, " %", &note, "water_drop") {
+        l.editor.wiped = (percent / 100.0).clamp(0.0, 1.0);
+    }
 }
 
 /// The renderer button: the three the Settings page offers, switched here for this page

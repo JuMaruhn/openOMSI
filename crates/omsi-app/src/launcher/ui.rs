@@ -79,6 +79,26 @@ enum PopupSide {
     Left,
 }
 
+/// An open slider flyout: a button of a side panel that sets a value rather than picking
+/// from a list. It opens beside its button like a list does (`PopupSide::Left`), and the
+/// slider inside it is drawn last, over everything.
+#[derive(Clone)]
+struct SliderPopup {
+    id: Id,
+    anchor: Rect,
+    value: f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    label: String,
+    /// What the slider writes beside the value (`" %"`).
+    unit: String,
+    /// A second line under the slider: what the value comes to elsewhere (the opacity a
+    /// wetness gives). Empty for none.
+    note: String,
+    opened: f32,
+}
+
 /// An open dropdown: its options are drawn last, over everything.
 #[derive(Clone)]
 struct Popup {
@@ -138,6 +158,9 @@ pub struct Ui {
     anims: HashMap<Id, f32>,
     pub scroll: HashMap<Id, f32>,
     popup: Option<Popup>,
+    slider_popup: Option<SliderPopup>,
+    /// The slider of an open flyout is being dragged.
+    drag_slider: bool,
     date_popup: Option<DatePopup>,
     /// Text fields: caret position (chars) and the time it last moved.
     caret: HashMap<Id, (usize, f32)>,
@@ -175,6 +198,8 @@ impl Ui {
             anims: HashMap::new(),
             scroll: HashMap::new(),
             popup: None,
+            slider_popup: None,
+            drag_slider: false,
             date_popup: None,
             caret: HashMap::new(),
             selection: HashMap::new(),
@@ -240,6 +265,12 @@ impl Ui {
             if let Some(p) = &self.popup {
                 if !popup_rect(p, self.size).contains(self.input.mouse) && !p.anchor.contains(self.input.mouse) && p.opened >= 1.0 {
                     self.popup = None;
+                    self.input.pressed = false;
+                }
+            }
+            if let Some(p) = &self.slider_popup {
+                if !slider_rect(p, self.size).contains(self.input.mouse) && !p.anchor.contains(self.input.mouse) && p.opened >= 1.0 {
+                    self.slider_popup = None;
                     self.input.pressed = false;
                 }
             }
@@ -314,6 +345,11 @@ impl Ui {
         }
         if let Some(p) = &self.popup {
             if popup_rect(p, self.size).contains(m) {
+                return false;
+            }
+        }
+        if let Some(p) = &self.slider_popup {
+            if slider_rect(p, self.size).contains(m) {
                 return false;
             }
         }
@@ -705,6 +741,59 @@ impl Ui {
         changed
     }
 
+    /// A panel button that opens a slider beside it rather than a list of options: one
+    /// value to set, shown under the button's name. Returns true when it moved.
+    ///
+    /// `note` is a second line under the slider for what the value comes to elsewhere - the
+    /// opacity a wetness gives, say - and is left empty for none.
+    #[allow(clippy::too_many_arguments)]
+    pub fn menu_slider(&mut self, name: &str, r: Rect, label: &str, value: &mut f32, min: f32, max: f32, step: f32, unit: &str, note: &str, icon: &str) -> bool {
+        let id = id_of(name);
+        let mut changed = false;
+        if let Some(p) = self.slider_popup.as_mut().filter(|p| p.id == id) {
+            if (p.value - *value).abs() > 1e-6 {
+                *value = p.value;
+                changed = true;
+            }
+            // the caller may have changed what is shown while it is open
+            (p.label, p.unit, p.note) = (label.to_string(), unit.to_string(), note.to_string());
+            p.anchor = r;
+        }
+        let (h, held, clicked) = self.interact(id, r);
+        let open = self.slider_popup.as_ref().map(|p| p.id == id).unwrap_or(false);
+        let t = self.anim(id, if h || open { 1.0 } else { 0.0 }, 0.08);
+        let rr = if held { r.inset(0.5) } else { r };
+        self.p().rounded(rr, 6.0, FIELD.mix(HOVER, t));
+        self.p().rounded_border(rr, 6.0, 1.0, if open { ACCENT.alpha(0.7) } else { EDGE });
+        let c = if h || open { TEXT } else { TEXT_SOFT };
+        self.icon(icon, Vec2::new(rr.x + 20.0, rr.center().y), 18.0, if open { ACCENT } else { c });
+        let text = Rect::new(rr.x + 38.0, rr.y, rr.w - 58.0, rr.h);
+        self.text_in(label, Rect::new(text.x, text.y + 5.0, text.w, 16.0), 13.0, Weight::Medium, c, Align::Left);
+        self.text_in(&format!("{:.0}{unit}", *value), Rect::new(text.x, text.y + text.h - 21.0, text.w, 16.0), 11.5, Weight::Regular, TEXT_DIM, Align::Left);
+        self.icon("chevron_left", Vec2::new(rr.right() - 16.0, rr.center().y), 18.0, if open { ACCENT } else { TEXT_DIM });
+        if clicked {
+            if open && self.slider_popup.as_ref().is_some_and(|p| p.opened >= 1.0) {
+                self.slider_popup = None;
+            } else if !open {
+                self.slider_popup = Some(SliderPopup {
+                    id,
+                    anchor: r,
+                    value: *value,
+                    min,
+                    max,
+                    step,
+                    label: label.to_string(),
+                    unit: unit.to_string(),
+                    note: note.to_string(),
+                    opened: 0.0,
+                });
+                self.popup = None;
+                self.date_popup = None;
+            }
+        }
+        changed
+    }
+
     /// A text field. Returns true when the text changed.
     pub fn text_input(&mut self, name: &str, r: Rect, value: &mut String, placeholder: &str, icon: Option<&str>) -> bool {
         let id = id_of(name);
@@ -1084,6 +1173,7 @@ impl Ui {
         self.clip_stack.clear();
         self.push_layer(Rect::new(0.0, 0.0, self.size.x, self.size.y), 0.0);
         self.draw_popup();
+        self.draw_slider_popup();
         self.draw_date_popup();
         if let Some((t, at)) = self.tooltip.take() {
             let w = (self.width(&t, 12.5, Weight::Medium) + 20.0).min(360.0);
@@ -1226,6 +1316,57 @@ impl Ui {
         self.popup = Some(p);
     }
 
+    fn draw_slider_popup(&mut self) {
+        let Some(mut p) = self.slider_popup.take() else { return };
+        let r = slider_rect(&p, self.size);
+        let fresh = p.opened < 0.5;
+        p.opened = (p.opened + self.dt / 0.3).min(1.0);
+        let e = 1.0 - (1.0 - p.opened).powi(3);
+        // in from the button it stands beside, as a list does
+        let rr = Rect::new(r.x + 6.0 * (1.0 - e), r.y, r.w, r.h);
+        self.p().rounded(rr, 8.0, Color::rgba(28, 28, 28, e));
+        self.p().rounded_border(rr, 8.0, 1.0, Color::WHITE.alpha(0.1 * e));
+        // The slider is drawn and dragged here rather than with `Ui::slider`: `hover` keeps
+        // every control out of an open flyout (as it does out of an open list), so a control
+        // inside one would never see the mouse. The calendar does its own the same way.
+        let row = Rect::new(rr.x + 12.0, rr.y + 12.0, rr.w - 24.0, 40.0);
+        let val_w = 58.0;
+        let track_r = Rect::new(row.x, row.y, row.w - val_w, row.h);
+        let over = rr.contains(self.input.mouse);
+        if over && self.input.pressed && !fresh {
+            self.drag_slider = true;
+        }
+        if !self.input.down {
+            self.drag_slider = false;
+        }
+        if self.drag_slider {
+            let t = ((self.input.mouse.x - track_r.x) / track_r.w.max(1.0)).clamp(0.0, 1.0);
+            let mut v = p.min + t * (p.max - p.min);
+            if p.step > 0.0 {
+                v = (v / p.step).round() * p.step;
+            }
+            p.value = v.clamp(p.min, p.max);
+            self.cursor = winit::window::CursorIcon::Grabbing;
+        }
+        self.text_in(&p.label, Rect::new(rr.x + 14.0, rr.y - 2.0, rr.w - 28.0, 18.0), 11.0, Weight::Bold, TEXT_DIM, Align::Left);
+        let frac = ((p.value - p.min) / (p.max - p.min).max(1e-6)).clamp(0.0, 1.0);
+        let cy = track_r.center().y + 4.0;
+        let th = 4.0;
+        let track = Rect::new(track_r.x, cy - th * 0.5, track_r.w, th);
+        self.p().rounded(track, th * 0.5, Color::rgba(58, 58, 58, 1.0));
+        self.p().rounded(Rect::new(track.x, track.y, track.w * frac, th), th * 0.5, ACCENT);
+        self.p().circle(Vec2::new(track.x + track.w * frac, cy), if over { 7.5 } else { 6.5 }, Color::rgba(240, 240, 240, 1.0));
+        let unit = p.unit.clone();
+        self.text_in(&format!("{:.0}{unit}", p.value), Rect::new(row.right() - val_w + 8.0, cy - 10.0, val_w - 8.0, 20.0), 12.5, Weight::Medium, TEXT, Align::Right);
+        if !p.note.is_empty() {
+            self.text_in(&p.note, Rect::new(rr.x + 14.0, rr.bottom() - 30.0, rr.w - 28.0, 18.0), 11.5, Weight::Regular, TEXT_DIM, Align::Left);
+        }
+        if rr.contains(self.input.mouse) {
+            self.over_ui = true;
+        }
+        self.slider_popup = Some(p);
+    }
+
     fn draw_date_popup(&mut self) {
         let Some(mut p) = self.date_popup.take() else { return };
         let r = date_rect(&p, self.size);
@@ -1335,6 +1476,13 @@ fn popup_rect(p: &Popup, size: Vec2) -> Rect {
     let below = p.anchor.bottom() + 6.0;
     let y = if below + h > size.y - 10.0 { (p.anchor.y - 6.0 - h).max(10.0) } else { below };
     Rect::new(p.anchor.x, y, p.anchor.w.max(200.0), h)
+}
+
+/// Beside its button, towards the left, its top in line with it (see [`popup_rect`]).
+fn slider_rect(p: &SliderPopup, size: Vec2) -> Rect {
+    let (w, h) = (264.0, if p.note.is_empty() { 78.0 } else { 96.0 });
+    let y = p.anchor.y.min(size.y - 10.0 - h).max(10.0);
+    Rect::new((p.anchor.x - 6.0 - w).max(10.0), y, w, h)
 }
 
 fn date_rect(p: &DatePopup, size: Vec2) -> Rect {
@@ -1556,6 +1704,30 @@ mod tests {
         assert!(r.x >= 10.0, "the list runs off the window at {}", r.x);
         assert_eq!(r.y, button.y, "its top stands with the button's");
         assert!(r.bottom() <= ui.size.y - 10.0, "it hangs out of the window");
+    }
+
+    /// A panel button whose flyout holds a slider opens it beside the button too, and the
+    /// flyout takes the mouse: nothing under it reacts.
+    #[test]
+    fn a_panel_buttons_slider_opens_beside_it_and_takes_the_mouse() {
+        let mut ui = Ui::new();
+        let mut v = 100.0f32;
+        let button = Rect::new(1160.0, 218.0, 220.0, 46.0);
+        ui.input.mouse = button.center();
+        for press in [true, false] {
+            ui.begin(Vec2::new(1440.0, 880.0), 1.0, 1.0 / 60.0);
+            (ui.input.pressed, ui.input.released) = (press, !press);
+            ui.menu_slider("n", button, "Wiped area", &mut v, 0.0, 100.0, 1.0, " %", "", "water_drop");
+            ui.finish();
+        }
+        let r = slider_rect(ui.slider_popup.as_ref().expect("the flyout is open"), ui.size);
+        assert!(r.right() <= button.x, "it covers its own button");
+        assert!(r.x >= 10.0 && r.bottom() <= ui.size.y - 10.0, "it hangs off the window");
+        assert_eq!(r.y, button.y, "its top stands with the button's");
+        // a control under the flyout must not see the mouse
+        ui.begin(Vec2::new(1440.0, 880.0), 1.0, 1.0 / 60.0);
+        ui.input.mouse = r.center();
+        assert!(!ui.hover(Rect::new(r.x - 20.0, r.y - 20.0, r.w + 40.0, r.h + 40.0)), "the page sees through the flyout");
     }
 
     /// A value the list does not hold (`selected` past its end) ticks nothing and is left

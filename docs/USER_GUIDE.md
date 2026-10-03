@@ -203,8 +203,12 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   *Settings → Graphics* says and does not change it, so flicking between the three to compare
   a bus leaves the game as it was. Under Enhanced a weather's visibility shows as the haze it
   is: the same bus under CAVOK (50 km) and under *Sommerlich* (2 km) is a clear sky and a
-  hazy one, which the other two do not draw. (The launcher's own window still sets ambient
-  occlusion off and keeps a small shadow map, for this page and the Drive page alike.)
+  hazy one, which the other two do not draw. *Wiped area* opens a slider for how far the
+  wipers have swept their part of the panes clear, from as wet as the rest of the glass to
+  dry; under it stands what that comes to on screen, because the layer is drawn at
+  `min(1, wetness x 1.8)` and is already fully opaque at a wetness of 0.56. (The launcher's
+  own window still sets ambient occlusion off and keeps a small shadow map, for this page and
+  the Drive page alike.)
 * **Setup** - where the original installation and the game binary are. The OMSI 2 folder may
   be given as a path with quotes, as `Omsi.exe` itself or as a folder inside it; unpacked into
   the OMSI 2 folder itself, openOMSI keeps its own content in an `openOMSI` folder there and

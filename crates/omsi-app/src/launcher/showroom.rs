@@ -41,6 +41,10 @@ pub struct Look {
     /// Vehicle Editor's own choice rather than the settings'. Empty without it, so changing
     /// it on that page never makes the Drive page's card a different picture.
     pub graphics: String,
+    /// With `effects`: how far the wipers have swept their part of the panes clear (0..1,
+    /// 1 = clean). It only ever stands the film where a sweep would have left it; the
+    /// wipers themselves do not run in a picture that holds still.
+    pub wiped: f32,
 }
 
 struct Ready {
@@ -86,6 +90,8 @@ pub struct Showroom {
     pub focus_x: f32,
     focus_now: f32,
     pub busy: bool,
+    /// How wet the unwiped panes settled on this weather (see [`Showroom::wetness`]).
+    wetness: f32,
     /// The picture: its texture and size, and whether it must be drawn again.
     target: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
     dirty: bool,
@@ -134,6 +140,7 @@ impl Showroom {
             focus_x: 0.5,
             focus_now: 0.5,
             busy: false,
+            wetness: 0.0,
             target: None,
             dirty: true,
             generation: 0,
@@ -204,7 +211,7 @@ impl Showroom {
                         s.lighting = lighting_for(&args, &s.weather, w.effects, &w.graphics);
                         if w.effects {
                             if let Some(v) = s.vehicle.as_mut() {
-                                weather_to_scripts(v, &s.weather);
+                                self.wetness = weather_to_scripts(v, &s.weather, w.wiped);
                             }
                         }
                     }
@@ -307,7 +314,7 @@ impl Showroom {
             t.init_text_textures(&mut world.fonts.lock(), &|p| omsi_texture::decode_file(p).ok().map(|i| (i.width, i.height, i.rgba)));
         }
         if r.look.effects {
-            weather_to_scripts(&mut vehicle, &weather);
+            self.wetness = weather_to_scripts(&mut vehicle, &weather, r.look.wiped);
         }
         vehicle.update(1.0 / 30.0);
         // the bus's size from its bounding box (with the rear section behind it)
@@ -397,6 +404,12 @@ impl Showroom {
         }
     }
 
+    /// How wet the unwiped panes stand (0..1), as the scripts settled them on this weather:
+    /// what the Vehicle Editor's wiper slider is a share of.
+    pub fn wetness(&self) -> f32 {
+        self.wetness
+    }
+
     /// A bus is there to show.
     pub fn has_picture(&self) -> bool {
         self.shown.as_ref().map(|s| s.vehicle.is_some()).unwrap_or(false) && self.target.is_some()
@@ -440,15 +453,77 @@ fn lighting_for(args: &Args, weather: &omsi_content::weather::Weather, effects: 
     l
 }
 
+/// The variables that carry a film of rain on this bus's panes: the `[matl_alphascale]` of
+/// a material whose name begins `rain_window`, which is how both the renderer and the
+/// vehicle know one (`scene.rs`, `omsi_sim::vehicle`, and `lan.rs` to send them).
+fn rain_films(ty: &omsi_sim::VehicleType) -> Vec<String> {
+    let mut v: Vec<String> = ty
+        .model
+        .meshes
+        .iter()
+        .flat_map(|m| m.materials.iter())
+        .filter_map(|mat| mat.alphascale.clone())
+        .filter(|n| n.trim().to_ascii_lowercase().starts_with("rain_window"))
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 /// Tell the bus's scripts what the weather is doing, as the game tells them
 /// (`weather_setup::apply_weather`): the precipitation type and rate, the state of the road
-/// and the air. A few frames let them settle on it - the drop film on the windows builds up
-/// over time rather than appearing at once.
-fn weather_to_scripts(vehicle: &mut omsi_sim::VehicleInstance, weather: &omsi_content::weather::Weather) {
-    crate::weather_setup::apply_weather(vehicle, weather, crate::weather_setup::initial_wetness(weather));
-    for _ in 0..3 {
-        vehicle.update(1.0 / 30.0);
+/// and the air. Then let them run until the picture has settled on it.
+///
+/// The film on the panes is no texture the weather switches on: it is a value the bus's own
+/// script builds up. The stock `rain.osc` is
+///
+/// ```text
+/// (L.S.Timegap) (L.L.PrecipRate) * s0
+/// (L.L.Rain_Window_Norm_Wetness) l0 + 1 min 0 max (S.L.Rain_Window_Norm_Wetness)
+/// ```
+///
+/// - the wetness gains with every frame of rain until it reaches 1, and
+/// `[matl_alphascale] Rain_Window_Norm_Wetness` then shows the drops (with the vehicle's 1.8
+/// boost, `omsi_sim::vehicle`). The showroom draws one frame per change, so a handful of
+/// ticks left every pane as good as dry.
+///
+/// How long that takes is the script's business, not ours, so the scripts are run until the
+/// film stops moving rather than for a time worked out from the rate - a bus whose script
+/// wets its panes by another rule settles just the same. `SETTLE_MAX` is only a stop for one
+/// that never settles (a wiper sweeping, say).
+///
+/// They are also set back to dry first. That script only ever adds: at `PrecipRate` 0
+/// nothing takes the water off again, so a bus looked at in the rain stayed wet under a
+/// clear sky, and every further rainy weather went on from where the last had stopped. This
+/// page shows one weather, not the ones looked at before it.
+fn weather_to_scripts(vehicle: &mut omsi_sim::VehicleInstance, weather: &omsi_content::weather::Weather, wiped: f32) -> f32 {
+    const STEP: f32 = 1.0 / 30.0;
+    const SETTLE_MAX: f32 = 20.0;
+    let films = rain_films(&vehicle.ty.clone());
+    for n in &films {
+        vehicle.set_var(n, 0.0);
     }
+    crate::weather_setup::apply_weather(vehicle, weather, crate::weather_setup::initial_wetness(weather));
+    let wettest = |v: &omsi_sim::VehicleInstance| films.iter().filter_map(|n| v.var(n)).fold(0.0f32, f32::max);
+    let mut last = wettest(vehicle);
+    for step in 0..(SETTLE_MAX / STEP) as u32 {
+        vehicle.update(STEP);
+        let now = wettest(vehicle);
+        // (a few frames for the rest of the bus whatever the panes do)
+        if step >= 2 && (now - last).abs() < 1e-4 {
+            break;
+        }
+        last = now;
+    }
+    // The wipers do not run in a picture that holds still, so their part of the glass is put
+    // where a sweep would have left it: `wiped` of the way from as wet as the rest to dry.
+    // `update(0.0)` then has the meshes read the new value without `rain.osc` putting a
+    // frame of rain back on (it gains `Timegap * PrecipRate`, and Timegap is 0).
+    for n in films.iter().filter(|n| n.to_ascii_lowercase().contains("wiped")) {
+        vehicle.set_var(n, last * (1.0 - wiped).clamp(0.0, 1.0));
+    }
+    vehicle.update(0.0);
+    last
 }
 
 /// A round showroom floor under the bus: dark, matt, catching its shadow.

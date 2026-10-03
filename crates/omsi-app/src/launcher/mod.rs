@@ -803,7 +803,8 @@ impl Launcher {
         // the Drive page's card keeps the plain picture it has always had - see `Look`)
         let effects = self.page == Page::VehicleEditor;
         let graphics = if effects { self.editor.graphics.clone() } else { String::new() };
-        let look = showroom::Look { root: std::path::PathBuf::from(&self.state.config.root), map: c.map.clone(), bus: c.bus.clone(), paint: c.paint.clone(), weather: c.weather.clone(), time: c.time, date: c.date.clone(), effects, graphics };
+        let wiped = if effects { self.editor.wiped } else { 1.0 };
+        let look = showroom::Look { root: std::path::PathBuf::from(&self.state.config.root), map: c.map.clone(), bus: c.bus.clone(), paint: c.paint.clone(), weather: c.weather.clone(), time: c.time, date: c.date.clone(), effects, graphics, wiped };
         // (not while a game runs: the launcher looked at meanwhile loads no bus onto the card)
         if !look.bus.is_empty() && !look.map.is_empty() && !self.state.in_game() {
             self.showroom.want(look);
