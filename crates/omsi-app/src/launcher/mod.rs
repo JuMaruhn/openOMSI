@@ -111,6 +111,7 @@ pub struct Launcher {
     /// The launcher made for a phone (see `phone`).
     pub phone: phone::PhoneView,
     pub pages: pages::PagesView,
+    pub editor: vehicle_editor::EditorView,
     pub mp: multiplayer::MultiplayerView,
     /// Server icons in the interface pipeline (by server address), and those decoded but
     /// not yet uploaded.
@@ -190,6 +191,7 @@ impl Launcher {
         drive: drive::DriveView::default(),
         phone: phone::PhoneView::default(),
         pages: pages::PagesView::default(),
+        editor: vehicle_editor::EditorView::default(),
         mp: multiplayer::MultiplayerView::default(),
         icons: Default::default(),
         icons_pending: Vec::new(),
@@ -792,7 +794,8 @@ impl Launcher {
         // (the Vehicle Editor is there to look at the weather itself, so it gets it whole;
         // the Drive page's card keeps the plain picture it has always had - see `Look`)
         let effects = self.page == Page::VehicleEditor;
-        let look = showroom::Look { root: std::path::PathBuf::from(&self.state.config.root), map: c.map.clone(), bus: c.bus.clone(), paint: c.paint.clone(), weather: c.weather.clone(), time: c.time, date: c.date.clone(), effects };
+        let graphics = if effects { self.editor.graphics.clone() } else { String::new() };
+        let look = showroom::Look { root: std::path::PathBuf::from(&self.state.config.root), map: c.map.clone(), bus: c.bus.clone(), paint: c.paint.clone(), weather: c.weather.clone(), time: c.time, date: c.date.clone(), effects, graphics };
         // (not while a game runs: the launcher looked at meanwhile loads no bus onto the card)
         if !look.bus.is_empty() && !look.map.is_empty() && !self.state.in_game() {
             self.showroom.want(look);

@@ -37,6 +37,10 @@ pub struct Look {
     /// picture it has always had; the Vehicle Editor, which is there to look at exactly
     /// these things, asks for it.
     pub effects: bool,
+    /// With `effects`: the renderer to draw in (`vanilla`, `vanilla_plus`, `enhanced`), the
+    /// Vehicle Editor's own choice rather than the settings'. Empty without it, so changing
+    /// it on that page never makes the Drive page's card a different picture.
+    pub graphics: String,
 }
 
 struct Ready {
@@ -197,7 +201,7 @@ impl Showroom {
                         let args = args_for(&w);
                         s.weather = load_weather(&args);
                         setup_sky(&args, renderer, &mut s.scene, omsi_content::Envir::load(&args.root.join("envir.cfg")).ok().as_ref(), Some(&s.weather));
-                        s.lighting = lighting_for(&args, &s.weather, w.effects);
+                        s.lighting = lighting_for(&args, &s.weather, w.effects, &w.graphics);
                         if w.effects {
                             if let Some(v) = s.vehicle.as_mut() {
                                 weather_to_scripts(v, &s.weather);
@@ -317,7 +321,7 @@ impl Showroom {
             centre.y = bb[4] + bb[1] * 0.5 - total * 0.5;
             length = total;
         }
-        let lighting = lighting_for(&args, &weather, r.look.effects);
+        let lighting = lighting_for(&args, &weather, r.look.effects, &r.look.graphics);
         log::info!("showroom: {} ({} meshes, {:.1} m long) placed in {:.2} s", r.look.bus, render.instances.len(), length, t0.elapsed().as_secs_f64());
         Shown { look: r.look, scene, world: Some(world), vehicle: Some(vehicle), render: Some(render), trailers, centre, length, weather, lighting }
     }
@@ -410,7 +414,7 @@ impl Showroom {
 /// Without `effects` six of its answers are taken back: the card beside the bus list is a
 /// thumbnail drawn on one fixed path, and a thumbnail of a bus in 75 m of ground fog would
 /// be a grey square. With them the picture is the game's.
-fn lighting_for(args: &Args, weather: &omsi_content::weather::Weather, effects: bool) -> Lighting {
+fn lighting_for(args: &Args, weather: &omsi_content::weather::Weather, effects: bool, graphics: &str) -> Lighting {
     let clock = start_clock(args);
     let envir = omsi_content::Envir::load(&args.root.join("envir.cfg")).ok();
     let daylight = omsi_sim::Daylight::compute(&clock, envir.as_ref());
@@ -418,9 +422,12 @@ fn lighting_for(args: &Args, weather: &omsi_content::weather::Weather, effects: 
     let mut l = weather_lighting(&daylight, weather, crate::weather_setup::cloud_drift_at(weather, clock.time), wetness, true);
     l.shadows = daylight.altitude_deg > 2.0;
     if effects {
-        // `enhanced` and `classic` are already the settings' own; the detail grain is not
-        // one of the statics, so it comes from the settings here as it does in the game
-        // (`app_events.rs`). The file is read on a relight, not on a frame.
+        // the renderer the page is set to, over the settings' own that `weather_lighting`
+        // took from the statics; the detail grain is not one of those, so it comes from the
+        // settings here as it does in the game (`app_events.rs`). The file is read on a
+        // relight, not on a frame.
+        l.enhanced = graphics == "enhanced";
+        l.classic = graphics == "vanilla";
         l.detail = crate::settings::Settings::load().detail_textures;
     } else {
         l.enhanced = false;
@@ -483,10 +490,10 @@ mod tests {
         w.precip = vec![2.0, 200.0];
         w.ground_wet[0] = 180.0;
 
-        let plain = lighting_for(&args, &w, false);
+        let plain = lighting_for(&args, &w, false, "");
         assert_eq!((plain.fog_density, plain.wetness, plain.snow), (0.0, 0.0, 0.0), "the card draws none of them");
 
-        let full = lighting_for(&args, &w, true);
+        let full = lighting_for(&args, &w, true, "vanilla_plus");
         assert!(full.fog_density > 0.0, "120 m of visibility is fog");
         assert!(full.wetness > 0.0, "a wet road is wet");
         assert!(full.snow > 0.0, "snow lies");
@@ -495,19 +502,17 @@ mod tests {
         assert_eq!(plain.shadows, full.shadows);
     }
 
-    /// The editor draws in the renderer the settings ask for, the card on one fixed path.
-    /// (`ENHANCED` is the process-wide static `launcher_statics` fills from the settings;
-    /// no other test reads it, and this one puts it back as it found it.)
+    /// The editor draws in the renderer its own button is set to, each of the three a
+    /// different pair of flags; the card draws on one fixed path whatever is chosen there.
     #[test]
-    fn only_a_page_that_asks_for_it_gets_the_enhanced_renderer() {
-        use std::sync::atomic::Ordering::Relaxed;
+    fn the_editors_button_picks_the_renderer_and_the_card_ignores_it() {
         let args = crate::cli::Args::parse_from(["openomsi"]);
         let w = omsi_content::weather::Weather::default();
-        let before = crate::ENHANCED.load(Relaxed);
-        crate::ENHANCED.store(true, Relaxed);
-        let (plain, full) = (lighting_for(&args, &w, false), lighting_for(&args, &w, true));
-        crate::ENHANCED.store(before, Relaxed);
-        assert!(full.enhanced, "the editor follows the settings");
-        assert!(!plain.enhanced, "the card does not");
+        for (mode, enhanced, classic) in [("vanilla", false, true), ("vanilla_plus", false, false), ("enhanced", true, false)] {
+            let l = lighting_for(&args, &w, true, mode);
+            assert_eq!((l.enhanced, l.classic), (enhanced, classic), "{mode}");
+            let card = lighting_for(&args, &w, false, mode);
+            assert_eq!((card.enhanced, card.classic), (false, false), "the card stays plain under {mode}");
+        }
     }
 }

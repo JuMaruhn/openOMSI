@@ -14,6 +14,7 @@
 
 use super::state::hhmm;
 use super::Launcher;
+use omsi_launcher_lib as core;
 use omsi_ui::Rect;
 
 /// The panel of buttons over the picture, down its right.
@@ -26,6 +27,23 @@ const BUTTON_H: f32 = 46.0;
 /// [`light_times`].
 const LIGHTS: [&str; 3] = ["Day", "Dusk", "Night"];
 
+/// The renderers to choose between, as the Settings page names them and in its order.
+const MODES: [(&str, &str); 3] = [("vanilla", "Vanilla (as OMSI 2)"), ("vanilla_plus", "Vanilla+"), ("enhanced", "Enhanced")];
+
+/// What the page keeps between frames: only the renderer it draws in, which starts as the
+/// one the settings ask for and is changed here for looking, not saved - the Settings page
+/// owns that choice, and a developer flicking between the three to compare a bus should not
+/// find their game changed afterwards.
+pub struct EditorView {
+    pub graphics: String,
+}
+
+impl Default for EditorView {
+    fn default() -> Self {
+        EditorView { graphics: core::graphics_mode(&crate::settings::Settings::load().graphics).to_string() }
+    }
+}
+
 /// The page: the showroom over the whole of `r`, the buttons over its right.
 ///
 /// A phone lays its pages out taller than its screen and scrolls them (`mobile::PAGE_H`), so
@@ -35,7 +53,7 @@ pub fn draw(l: &mut Launcher, r: Rect) {
     let h = r.h.min(l.ui.size.y - r.y - 24.0).max(200.0);
     let page = Rect::new(r.x, r.y, r.w, h);
     // the panel is told before the picture is drawn, so a drag on it never turns the bus
-    let rows = 2.0;
+    let rows = 3.0;
     let panel = Rect::new(
         page.right() - PANEL_PAD - PANEL_W,
         page.y + PANEL_PAD,
@@ -57,6 +75,20 @@ fn buttons(l: &mut Launcher, panel: Rect) {
     weather(l, Rect::new(x, y, w, BUTTON_H));
     y += BUTTON_H + 8.0;
     time(l, Rect::new(x, y, w, BUTTON_H));
+    y += BUTTON_H + 8.0;
+    graphics(l, Rect::new(x, y, w, BUTTON_H));
+}
+
+/// The renderer button: the three the Settings page offers, switched here for this page
+/// alone (see [`EditorView`]). Switching only changes `Look`, so the bus is not read again -
+/// the picture is drawn once more in the other renderer.
+fn graphics(l: &mut Launcher, r: Rect) {
+    let labels: Vec<String> = MODES.iter().map(|(_, n)| (*n).to_string()).collect();
+    let mut sel = MODES.iter().position(|(v, _)| *v == l.editor.graphics).unwrap_or(1);
+    let value = omsi_ui::tr(MODES[sel.min(MODES.len() - 1)].1).to_string();
+    if l.ui.menu_button("editor-graphics", r, "Graphics", &value, "palette", &mut sel, &labels) {
+        l.editor.graphics = MODES[sel].0.to_string();
+    }
 }
 
 /// The weather button: the installed weathers, without the ones that are not a scene a
