@@ -180,6 +180,10 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
 * **Timetable** - a map's lines, their tours and trips. Changes stay while you move between
   lines and are saved together (*Save all*); **New line** makes a line, **Repeat** turns a tour
   into a whole day of them (every *n* minutes up to a last departure).
+* **Vehicle Editor** - the chosen bus by itself, over the whole page: the same picture the
+  Drive page shows in its card, drawn by the game's own renderer, so it is the bus as it will
+  stand on the road - its paint, its materials and the light of the chosen time and weather.
+  Drag it to turn it, the wheel zooms. Nothing is changed here yet.
 * **Setup** - where the original installation and the game binary are. The OMSI 2 folder may
   be given as a path with quotes, as `Omsi.exe` itself or as a folder inside it; unpacked into
   the OMSI 2 folder itself, openOMSI keeps its own content in an `openOMSI` folder there and

@@ -21,6 +21,7 @@ mod theme;
 mod timetable;
 mod ui;
 mod update;
+mod vehicle_editor;
 
 use glam::Vec2;
 use omsi_launcher_lib as core;
@@ -48,10 +49,11 @@ pub enum Page {
     Mods,
     Tutorials,
     Timetable,
+    VehicleEditor,
     Setup,
 }
 
-const PAGES: [(Page, &str, &str); 10] = [
+const PAGES: [(Page, &str, &str); 11] = [
     (Page::Drive, "Drive", "directions_bus"),
     (Page::Multiplayer, "Multiplayer", "groups"),
     (Page::Profile, "Profile", "badge"),
@@ -61,6 +63,7 @@ const PAGES: [(Page, &str, &str); 10] = [
     (Page::Mods, "Mods", "extension"),
     (Page::Tutorials, "Tutorials", "help"),
     (Page::Timetable, "Timetable", "schedule"),
+    (Page::VehicleEditor, "Vehicle Editor", "garage"),
     (Page::Setup, "Setup", "folder_open"),
 ];
 
@@ -1014,6 +1017,7 @@ impl Launcher {
             Page::Mods => pages::mods(self, content),
             Page::Tutorials => pages::tutorials(self, content),
             Page::Timetable => timetable::draw(self, content),
+            Page::VehicleEditor => vehicle_editor::draw(self, content),
             Page::Setup => pages::setup(self, content),
         }
         // the rail over the page (a scrolled page passes under it)
