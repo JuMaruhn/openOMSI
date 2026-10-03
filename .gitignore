@@ -6,6 +6,7 @@
 # local tools and editors
 .DS_Store
 .claude/
+CLAUDE.md
 .idea/
 .vscode/
 node_modules/
