@@ -212,12 +212,18 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   driver's seat, **F2** a passenger's, **F3** the turning view of the whole bus;
   **Numpad 4 / 6** step through the eyes a bus offers of the kind in use
   (`view_interiorcam_minus` / `_plus`), **Numpad 8** puts every direction back
-  (`view_reset_all_directions`). The camera flies with the keys the game flies its free
-  camera with: **W / S** forward and back, **A / D** to the sides, **Q** down, **E** (or
-  Space) up, **Shift** five times as fast, and the **arrow keys** to turn. Dragging with the
-  mouse turns the view in every one of them - round the bus outside, the head inside - and
-  the wheel zooms the outside view. Flying is an offset from where a view puts the camera, so
-  F1, F2, F3 or Numpad 8 bring it back.
+  (`view_reset_all_directions`), and **F4** is the free camera, which starts where the view
+  before it was looking. Only F4 flies, with the keys the game flies its own free camera
+  with: **W / S** forward and back, **A / D** to the sides, **Q** down, **E** (or Space) up,
+  **Shift** five times as fast. F1 and F2 sit at an eye the bus gives and F3 turns about it,
+  so there is nothing there to fly out of. Dragging with the mouse turns whichever view is
+  in use - round the bus outside, the head at an eye, the free camera on the spot - the
+  **arrow keys** turn it as well, and the wheel zooms the outside view. Numpad 8 also brings
+  a free camera back to the outside view, which is the way out of having flown off.
+
+  This page and the Drive page keep their own camera: turning the bus here leaves the card
+  beside the bus list where it was. They share the one bus, so the editor running its scripts
+  on to settle a weather does move its suspension a fraction, which the card then shows too.
 * **Setup** - where the original installation and the game binary are. The OMSI 2 folder may
   be given as a path with quotes, as `Omsi.exe` itself or as a folder inside it; unpacked into
   the OMSI 2 folder itself, openOMSI keeps its own content in an `openOMSI` folder there and

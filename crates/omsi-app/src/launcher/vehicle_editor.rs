@@ -66,28 +66,24 @@ const FLY_BOOST: f32 = 5.0;
 /// through the eyes a bus gives - and Numpad 8 is `view_reset_all_directions`. The number
 /// row is left alone: there it is doors, IBIS and the cash desk, nothing to do with a view.
 pub fn view_key(l: &mut super::Launcher, code: KeyCode) -> bool {
-    let step = |l: &mut super::Launcher, by: i32| {
-        l.showroom.view = stepped(l.showroom.view, by, l.showroom.interior_count(l.showroom.view));
-        l.showroom.look = (0.0, 0.0);
-        l.showroom.redraw();
-    };
-    match code {
-        KeyCode::F1 => l.showroom.view = EditorCam::Driver(0),
-        KeyCode::F2 => l.showroom.view = EditorCam::Pax(0),
-        KeyCode::F3 => l.showroom.view = EditorCam::Outside,
-        KeyCode::Numpad4 => return { step(l, -1); true },
-        KeyCode::Numpad6 => return { step(l, 1); true },
+    let view = match code {
+        KeyCode::F1 => EditorCam::Driver(0),
+        KeyCode::F2 => EditorCam::Pax(0),
+        KeyCode::F3 => EditorCam::Outside,
+        KeyCode::F4 => EditorCam::Free,
+        KeyCode::Numpad4 | KeyCode::Numpad6 => {
+            let by = if code == KeyCode::Numpad6 { 1 } else { -1 };
+            let now = l.showroom.view();
+            l.showroom.step_view(stepped(now, by, l.showroom.interior_count(now)));
+            return true;
+        }
         KeyCode::Numpad8 => {
-            l.showroom.look = (0.0, 0.0);
             l.showroom.reset_turn();
-            l.showroom.redraw();
             return true;
         }
         _ => return false,
-    }
-    // a view just taken looks where its own eye looks
-    l.showroom.look = (0.0, 0.0);
-    l.showroom.redraw();
+    };
+    l.showroom.set_view(view);
     true
 }
 
@@ -109,8 +105,9 @@ fn stepped(view: EditorCam, by: i32, n: usize) -> EditorCam {
 /// free camera with (`input_script::flies_free_camera`): W and S forward and back, A and D
 /// to the sides, Q down and E (or Space) up, Shift to hurry, and the arrow keys to turn.
 ///
-/// Flying is an offset from where the view puts the camera, so it works in the cab and in
-/// the saloon as well as round the bus, and F1, F2, F3 or Numpad 8 bring it back.
+/// Only F4 flies, as only the game's F4 does. F1 and F2 sit at an eye the bus gives and F3
+/// turns about it: a camera that could be flown out of those would not be the view any
+/// more, and flying it under the floor is the first thing that happens.
 fn fly_keys(l: &mut super::Launcher, dt: f32) {
     let down = |c: KeyCode| l.held.contains(&c);
     let axis = |a: KeyCode, b: KeyCode| down(a) as i32 as f32 - down(b) as i32 as f32;
@@ -304,6 +301,7 @@ mod tests {
         assert_eq!(stepped(EditorCam::Pax(1), -1, 2), EditorCam::Pax(0));
         assert_eq!(stepped(EditorCam::Pax(0), 1, 0), EditorCam::Pax(0), "a bus with no such eye");
         assert_eq!(stepped(EditorCam::Outside, 1, 3), EditorCam::Outside, "outside has none to step");
+        assert_eq!(stepped(EditorCam::Free, 1, 3), EditorCam::Free, "nor the free camera");
     }
 
     /// The names the time button offers are keys of the translation tables, so the page is
