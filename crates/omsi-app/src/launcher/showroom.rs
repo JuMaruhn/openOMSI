@@ -231,6 +231,9 @@ impl Showroom {
         let c = self.cam_mut();
         c.view = view;
         c.look = (0.0, 0.0);
+        // the zoom is a distance outside and a field of view at an eye, so it does not
+        // carry from one to the other: a view just taken is the view as it is meant
+        (c.zoom, c.zoom_to) = (1.0, 1.0);
         if view == EditorCam::Free {
             if let Some((p, yaw, pitch)) = last {
                 (c.pos, c.look) = (p, (yaw, pitch));
@@ -336,9 +339,15 @@ impl Showroom {
         self.dirty = true;
     }
 
+    /// The wheel. Outside it is the distance the camera stands at, as it has always been;
+    /// at an eye of the bus and in the free view there is no distance to change, so it is
+    /// the field of view instead, the way Omsi.exe zooms a view of the bus
+    /// (`app_events`: `fov_deg = base * view_zoom`, 8 to 120 degrees). The range is wider
+    /// there for that reason: 0.16 of a 50-degree eye is the 8 degrees the original allows.
     pub fn zoom_by(&mut self, k: f32) {
         let c = self.cam_mut();
-        c.zoom_to = (c.zoom_to * k).clamp(0.55, 2.2);
+        let (lo, hi) = if c.view == EditorCam::Outside { (0.55, 2.2) } else { (0.16, 2.4) };
+        c.zoom_to = (c.zoom_to * k).clamp(lo, hi);
         c.idle = 0.0;
     }
 
@@ -573,13 +582,14 @@ impl Showroom {
             match c.view {
                 // standing anywhere, looking anywhere (F4)
                 EditorCam::Free => {
-                    cam = Camera { position: c.pos, yaw: c.look.0, pitch: c.look.1, roll: 0.0, fov_deg: 55.0, near: 0.05, far: 6000.0 };
+                    cam = Camera { position: c.pos, yaw: c.look.0, pitch: c.look.1, roll: 0.0, fov_deg: zoomed(55.0, zoom), near: 0.05, far: 6000.0 };
                 }
                 // at one of the bus's own eyes (F1, F2), turned by the look
                 view => {
                     if let (Some(e), Some(v)) = (interior_camera(s, view), s.vehicle.as_ref()) {
                         let (eye, cyaw, cpitch) = v.camera_world(&e);
-                        let fov = if e.fov > 1.0 { e.fov } else { 50.0 };
+                        // the eye's own field of view, zoomed as Omsi.exe zooms one
+                        let fov = zoomed(if e.fov > 1.0 { e.fov } else { 50.0 }, zoom);
                         cam = Camera { position: eye, yaw: cyaw + c.look.0, pitch: cpitch + c.look.1, roll: 0.0, fov_deg: fov, near: 0.05, far: 6000.0 };
                     }
                 }
@@ -728,6 +738,13 @@ fn weather_to_scripts(vehicle: &mut omsi_sim::VehicleInstance, weather: &omsi_co
     last
 }
 
+/// A field of view zoomed by `k`, held within the 8 to 120 degrees Omsi.exe holds one in
+/// (`app_events`). Below one it is zoomed in, as a smaller `zoom` stands the outside camera
+/// closer.
+fn zoomed(base: f32, k: f32) -> f32 {
+    (base * k).clamp(8.0, 120.0)
+}
+
 /// Whether a drag turns the picture round the bus rather than turning a head inside it.
 /// Outside it always does, and so does every page but the Vehicle Editor: the card beside
 /// the bus list has no inside view to turn a head in.
@@ -825,6 +842,15 @@ mod tests {
         sr.on_editor = true;
         assert!(sr.cam().yaw_to > START_YAW, "and the editor kept its own");
         assert_eq!(sr.cam().view, EditorCam::Driver(0));
+    }
+
+    /// The wheel zooms an eye's field of view within the range the original holds one in.
+    #[test]
+    fn an_eyes_zoom_stays_within_the_originals_range() {
+        assert_eq!(zoomed(50.0, 1.0), 50.0, "untouched, the eye's own");
+        assert_eq!(zoomed(50.0, 0.16), 8.0, "the far end of the wheel is the original's 8 degrees");
+        assert_eq!(zoomed(50.0, 0.05), 8.0, "and no further");
+        assert_eq!(zoomed(60.0, 2.4), 120.0, "nor wider than 120");
     }
 
     /// A drag turns the head inside the bus and the picture round it outside - but only on

@@ -218,7 +218,9 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   **Shift** five times as fast. F1 and F2 sit at an eye the bus gives and F3 turns about it,
   so there is nothing there to fly out of. Dragging with the mouse turns whichever view is
   in use - round the bus outside, the head at an eye, the free camera on the spot - the
-  **arrow keys** turn it as well, and the wheel zooms the outside view. Numpad 8 also brings
+  **arrow keys** turn it as well. The wheel zooms in every view: outside it is the distance
+  the camera stands at, at an eye of the bus and in the free view the field of view, the way
+  Omsi.exe zooms a view of the bus (down to its 8 degrees). Numpad 8 also brings
   a free camera back to the outside view, which is the way out of having flown off. The four
   views are also a row of small buttons over the top left of the picture - *Driver's seat*,
   *Saloon*, *Around the bus*, *Free camera* - each naming its key when the mouse rests on it.
