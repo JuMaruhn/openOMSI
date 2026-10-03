@@ -183,7 +183,14 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
 * **Vehicle Editor** - the chosen bus by itself, over the whole page: the same picture the
   Drive page shows in its card, drawn by the game's own renderer, so it is the bus as it will
   stand on the road - its paint, its materials and the light of the chosen time and weather.
-  Drag it to turn it, the wheel zooms. Nothing is changed here yet.
+  Drag it to turn it, the wheel zooms. The buttons down its right open their choices beside
+  them, towards the left, so the list never covers the bus. *Weather* offers every weather
+  of the installation, winter ones on a summer date as well (the Drive page leaves those out;
+  here a bus in snow in May is the point), and leaves out the ones that are not a scene to
+  look at - the custom editor, the airport's live report and the cycle that changes as the
+  game runs. *Time* offers day, dusk and night as hours of this map and this date, worked out
+  from where the sun actually stands, so a northern map's dusk in December is not its dusk in
+  June. Both set the same time and weather the Drive page's *Time & weather* step sets.
 * **Setup** - where the original installation and the game binary are. The OMSI 2 folder may
   be given as a path with quotes, as `Omsi.exe` itself or as a folder inside it; unpacked into
   the OMSI 2 folder itself, openOMSI keeps its own content in an `openOMSI` folder there and

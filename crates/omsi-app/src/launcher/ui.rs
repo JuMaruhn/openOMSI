@@ -70,11 +70,21 @@ pub struct Input {
     pub touch: bool,
 }
 
+/// Where a list opens: under the field it belongs to, or beside it towards the left. A
+/// button standing against the window's right edge takes the second: a list under it would
+/// cover the very picture the button is there to change.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PopupSide {
+    Below,
+    Left,
+}
+
 /// An open dropdown: its options are drawn last, over everything.
 #[derive(Clone)]
 struct Popup {
     id: Id,
     anchor: Rect,
+    side: PopupSide,
     options: Vec<String>,
     selected: usize,
     scroll: f32,
@@ -288,6 +298,14 @@ impl Ui {
 
     fn clip_now(&self) -> Rect {
         self.clip_stack.last().map(|c| c.0).unwrap_or(Rect::new(0.0, 0.0, self.size.x, self.size.y))
+    }
+
+    /// An open list lies over `p`. `hover` already keeps controls from reacting under one;
+    /// the launcher asks this before it turns the bus under one, which goes through the
+    /// window's events rather than through a control.
+    pub fn popup_over(&self, p: Vec2) -> bool {
+        self.popup.as_ref().is_some_and(|q| popup_rect(q, self.size).contains(p))
+            || self.date_popup.as_ref().is_some_and(|q| date_rect(q, self.size).contains(p))
     }
 
     pub fn rect_visible(&self, r: Rect) -> bool {
@@ -617,7 +635,7 @@ impl Ui {
             } else if open {
             } else {
                 let sel = (*selected).min(options.len().saturating_sub(1));
-                let mut p = Popup { id, anchor: r, options: options.to_vec(), selected: sel, scroll: 0.0, opened: 0.0, picked: None, drag: None, query: String::new() };
+                let mut p = Popup { id, anchor: r, side: PopupSide::Below, options: options.to_vec(), selected: sel, scroll: 0.0, opened: 0.0, picked: None, drag: None, query: String::new() };
                 // the chosen option in view
                 let row = 34.0;
                 let visible = popup_rect(&p, self.size).h;
@@ -628,6 +646,68 @@ impl Ui {
         } else if let Some(p) = self.popup.as_mut().filter(|p| p.id == id) {
             // the options may change while it is open
             p.options = options.to_vec();
+            p.anchor = r;
+        }
+        changed
+    }
+
+    /// A button of a side panel that opens its options beside it, towards the left, and
+    /// shows what is chosen under its name. Returns true when another was picked.
+    ///
+    /// `selected` outside `options` is none of them - the chosen value is then something the
+    /// list does not offer (a weather cycle, a time nobody named), and nothing is ticked.
+    pub fn menu_button(&mut self, name: &str, r: Rect, label: &str, value: &str, icon: &str, selected: &mut usize, options: &[String]) -> bool {
+        let id = id_of(name);
+        let mut changed = false;
+        if let Some(p) = self.popup.as_mut().filter(|p| p.id == id) {
+            if let Some(k) = p.picked.take() {
+                if k != *selected && k < options.len() {
+                    *selected = k;
+                    changed = true;
+                }
+                self.popup = None;
+            }
+        }
+        let (h, held, clicked) = self.interact(id, r);
+        let open = self.popup.as_ref().map(|p| p.id == id).unwrap_or(false);
+        let t = self.anim(id, if h || open { 1.0 } else { 0.0 }, 0.08);
+        let rr = if held { r.inset(0.5) } else { r };
+        self.p().rounded(rr, 6.0, FIELD.mix(HOVER, t));
+        self.p().rounded_border(rr, 6.0, 1.0, if open { ACCENT.alpha(0.7) } else { EDGE });
+        let c = if h || open { TEXT } else { TEXT_SOFT };
+        self.icon(icon, Vec2::new(rr.x + 20.0, rr.center().y), 18.0, if open { ACCENT } else { c });
+        let text = Rect::new(rr.x + 38.0, rr.y, rr.w - 58.0, rr.h);
+        if value.is_empty() {
+            self.text_in(label, text, 13.0, Weight::Medium, c, Align::Left);
+        } else {
+            // (the name over what it stands at, as the settings rows read)
+            self.text_in(label, Rect::new(text.x, text.y + 5.0, text.w, 16.0), 13.0, Weight::Medium, c, Align::Left);
+            self.text_in(value, Rect::new(text.x, text.y + text.h - 21.0, text.w, 16.0), 11.5, Weight::Regular, TEXT_DIM, Align::Left);
+        }
+        self.icon("chevron_left", Vec2::new(rr.right() - 16.0, rr.center().y), 18.0, if open { ACCENT } else { TEXT_DIM });
+        if clicked {
+            // (a phone's tap can come twice - as a touch and as the mouse click made of it)
+            if open && self.popup.as_ref().is_some_and(|p| p.opened >= 1.0) {
+                self.popup = None;
+            } else if !open {
+                self.popup = Some(Popup {
+                    id,
+                    anchor: r,
+                    side: PopupSide::Left,
+                    options: options.to_vec(),
+                    selected: *selected,
+                    scroll: 0.0,
+                    opened: 0.0,
+                    picked: None,
+                    drag: None,
+                    query: String::new(),
+                });
+                self.date_popup = None;
+            }
+        } else if let Some(p) = self.popup.as_mut().filter(|p| p.id == id) {
+            // the options may change while it is open
+            p.options = options.to_vec();
+            p.selected = *selected;
             p.anchor = r;
         }
         changed
@@ -1067,7 +1147,11 @@ impl Ui {
         let fresh = p.opened < 0.5;
         p.opened = (p.opened + self.dt / 0.3).min(1.0);
         let e = 1.0 - (1.0 - p.opened).powi(3);
-        let rr = Rect::new(r.x, r.y - 6.0 * (1.0 - e), r.w, r.h);
+        // (coming out from under the field, or in from the button it stands beside)
+        let rr = match p.side {
+            PopupSide::Below => Rect::new(r.x, r.y - 6.0 * (1.0 - e), r.w, r.h),
+            PopupSide::Left => Rect::new(r.x + 6.0 * (1.0 - e), r.y, r.w, r.h),
+        };
         self.p().rounded(rr, 8.0, Color::rgba(28, 28, 28, e));
         self.p().rounded_border(rr, 8.0, 1.0, Color::WHITE.alpha(0.1 * e));
         let row = 34.0;
@@ -1241,6 +1325,13 @@ fn intersect(a: Rect, b: Rect) -> Rect {
 fn popup_rect(p: &Popup, size: Vec2) -> Rect {
     let row = 34.0;
     let h = (p.options.len() as f32 * row + 8.0).min(320.0);
+    if p.side == PopupSide::Left {
+        // beside the button, its top in line with it, pulled up only by what the window
+        // leaves below
+        let w = p.anchor.w.max(200.0);
+        let y = p.anchor.y.min(size.y - 10.0 - h).max(10.0);
+        return Rect::new((p.anchor.x - 6.0 - w).max(10.0), y, w, h);
+    }
     let below = p.anchor.bottom() + 6.0;
     let y = if below + h > size.y - 10.0 { (p.anchor.y - 6.0 - h).max(10.0) } else { below };
     Rect::new(p.anchor.x, y, p.anchor.w.max(200.0), h)
@@ -1442,6 +1533,51 @@ mod tests {
         ui.input.wheel.y = -2.0;
         ui.select("n", field, &mut sel, &options);
         assert!(!ui.wheel_taken());
+    }
+
+    /// A panel button against the right edge opens its list towards the left, clear of the
+    /// button, and keeps it on the window even when it is taller than the room below.
+    #[test]
+    fn a_panel_buttons_list_opens_beside_it_to_the_left() {
+        let options: Vec<String> = (0..9).map(|k| format!("{k}")).collect();
+        let mut ui = Ui::new();
+        let mut sel = 0;
+        // as the Vehicle Editor places it: against the right edge, near the top
+        let button = Rect::new(1160.0, 56.0, 220.0, 46.0);
+        ui.input.mouse = button.center();
+        for press in [true, false] {
+            ui.begin(Vec2::new(1440.0, 880.0), 1.0, 1.0 / 60.0);
+            (ui.input.pressed, ui.input.released) = (press, !press);
+            ui.menu_button("n", button, "Weather", "Sunny", "wb_sunny", &mut sel, &options);
+            ui.finish();
+        }
+        let r = popup_rect(ui.popup.as_ref().expect("the list is open"), ui.size);
+        assert!(r.right() <= button.x, "the list covers the button: {} > {}", r.right(), button.x);
+        assert!(r.x >= 10.0, "the list runs off the window at {}", r.x);
+        assert_eq!(r.y, button.y, "its top stands with the button's");
+        assert!(r.bottom() <= ui.size.y - 10.0, "it hangs out of the window");
+        // the mouse over it is over an open list, so a drag there must not turn the bus
+        assert!(ui.popup_over(r.center()));
+        assert!(!ui.popup_over(Vec2::new(600.0, 600.0)));
+    }
+
+    /// A value the list does not hold (`selected` past its end) ticks nothing and is left
+    /// alone: the weather may be a cycle the Vehicle Editor's list does not offer.
+    #[test]
+    fn a_panel_button_may_stand_at_none_of_its_options() {
+        let options: Vec<String> = ["Day", "Dusk", "Night"].iter().map(|s| s.to_string()).collect();
+        let mut ui = Ui::new();
+        let mut sel = usize::MAX;
+        let button = Rect::new(1160.0, 56.0, 220.0, 46.0);
+        ui.input.mouse = button.center();
+        for press in [true, false] {
+            ui.begin(Vec2::new(1440.0, 880.0), 1.0, 1.0 / 60.0);
+            (ui.input.pressed, ui.input.released) = (press, !press);
+            assert!(!ui.menu_button("n", button, "Time", "07:30", "wb_twilight", &mut sel, &options));
+            ui.finish();
+        }
+        assert_eq!(sel, usize::MAX, "nothing was picked, so nothing changed");
+        assert_eq!(ui.popup.as_ref().unwrap().selected, usize::MAX, "and nothing is ticked");
     }
 
     /// Typing into an open dropdown leaves the options with the text in their name; Enter

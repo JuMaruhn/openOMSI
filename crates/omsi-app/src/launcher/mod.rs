@@ -117,6 +117,9 @@ pub struct Launcher {
     pub icons_pending: Vec<(String, image::RgbaImage)>,
     last: Instant,
     modifiers: ModifiersState,
+    /// Where a page put a panel over the picture: a drag there must not turn the bus
+    /// (the Vehicle Editor's buttons stand on the picture itself). Set before `preview`.
+    preview_block: Option<Rect>,
     /// Right or left drag over the showroom.
     dragging: Option<Vec2>,
     clipboard: Option<Clipboard>,
@@ -209,6 +212,7 @@ impl Launcher {
             .unwrap_or_default(),
         release_next: false,
         preview_rect: None,
+        preview_block: None,
         preview_tex: None,
         preview_gen: 0,
         focused: true,
@@ -439,7 +443,7 @@ impl ApplicationHandler for Launcher {
                         if down {
                             self.ui.input.pressed = true;
                             // a drag on the preview turns the bus
-                            if self.preview_rect.map(|r| r.contains(self.ui.input.mouse)).unwrap_or(false) {
+                            if self.on_preview(self.ui.input.mouse) {
                                 self.dragging = Some(self.ui.input.mouse);
                             }
                         } else {
@@ -452,7 +456,7 @@ impl ApplicationHandler for Launcher {
                         self.ui.input.right_down = down;
                         if down {
                             self.ui.input.right_pressed = true;
-                            if self.preview_rect.map(|r| r.contains(self.ui.input.mouse)).unwrap_or(false) {
+                            if self.on_preview(self.ui.input.mouse) {
                                 self.dragging = Some(self.ui.input.mouse);
                             }
                         } else {
@@ -788,6 +792,7 @@ impl Launcher {
 
         // --- the interface
         self.preview_rect = None;
+        self.preview_block = None;
         self.ui.begin(size, scale, dt);
         self.draw_ui();
         if mobile::mobile() {
@@ -1064,6 +1069,12 @@ impl Launcher {
 
     /// The bus preview in `r`: the game's picture of it, or a word while it loads. The mouse
     /// dragged on it turns the bus, the wheel zooms.
+    /// `p` is on the picture and free: inside it, and under neither a page's panel nor an
+    /// open list.
+    fn on_preview(&self, p: Vec2) -> bool {
+        self.preview_rect.is_some_and(|r| r.contains(p)) && !self.preview_block.is_some_and(|b| b.contains(p)) && !self.ui.popup_over(p)
+    }
+
     pub fn preview(&mut self, r: Rect) {
         self.preview_rect = Some(r);
         self.ui.solid(r);
@@ -1080,10 +1091,11 @@ impl Launcher {
             let a = self.ui.time * 5.0;
             self.ui.p().arc(c, 6.0, 8.0, a, a + 4.2, TEXT_SOFT);
         }
-        if self.ui.hover(r) && self.ui.input.wheel.y.abs() > 0.0 {
+        let on_picture = self.ui.hover(r) && !self.preview_block.is_some_and(|b| b.contains(self.ui.input.mouse));
+        if on_picture && self.ui.input.wheel.y.abs() > 0.0 {
             self.showroom.zoom_by((1.0 - self.ui.input.wheel.y * 0.08).clamp(0.8, 1.25));
         }
-        if self.ui.hover(r) {
+        if on_picture {
             self.ui.cursor = winit::window::CursorIcon::Grab;
         }
     }
