@@ -13,6 +13,7 @@
 //! the mouse. A drag on the panel is kept off the bus the same way, by `Ui::over_ui`.
 
 use super::state::hhmm;
+use super::theme::*;
 use super::Launcher;
 use omsi_launcher_lib as core;
 use omsi_ui::Rect;
@@ -28,6 +29,20 @@ const BUTTON_H: f32 = 46.0;
 /// The light a time stands for. The hours themselves are the sun's, not fixed numbers: see
 /// [`light_times`].
 const LIGHTS: [&str; 3] = ["Day", "Dusk", "Night"];
+
+/// The four views, in the order of the keys that take them: name, icon, and the key said in
+/// the tooltip. `Driver` and `Pax` stand for whichever of the bus's eyes is in use.
+const VIEWS: [(EditorCam, &str, &str, &str); 4] = [
+    (EditorCam::Driver(0), "Driver's seat", "airline_seat_recline_normal", "F1"),
+    (EditorCam::Pax(0), "Saloon", "groups", "F2"),
+    (EditorCam::Outside, "Around the bus", "360", "F3"),
+    (EditorCam::Free, "Free camera", "open_with", "F4"),
+];
+
+/// The view buttons: square, icon only, in a row at the top left of the picture. They are
+/// the keys in another form, so they are kept as small as a control of this interface goes
+/// - the page is there to look at the bus, not at its buttons.
+const VIEW_BUTTON: f32 = 34.0;
 
 /// The renderers to choose between, as the Settings page names them and in its order.
 const MODES: [(&str, &str); 3] = [("vanilla", "Vanilla (as OMSI 2)"), ("vanilla_plus", "Vanilla+"), ("enhanced", "Enhanced")];
@@ -143,8 +158,34 @@ pub fn draw(l: &mut Launcher, r: Rect) {
     // it, so the showroom frames it in the middle (`focus` 0.5) rather than to one side
     fly_keys(l, l.ui.dt);
     l.preview_full(page, 0.5);
+    views(l, Rect::new(page.x + PANEL_PAD, page.y + PANEL_PAD, VIEW_BUTTON * 4.0 + 12.0 + 16.0, VIEW_BUTTON + 16.0));
     buttons(l, panel);
     l.showroom_pointer(page);
+}
+
+/// The row of view buttons over the top left of the picture. Which one is on follows the
+/// camera, so the keys and the buttons never disagree.
+fn views(l: &mut Launcher, panel: Rect) {
+    l.ui.panel(panel);
+    let now = l.showroom.view();
+    for (i, (view, name, icon, key)) in VIEWS.iter().enumerate() {
+        let r = Rect::new(panel.x + 8.0 + i as f32 * (VIEW_BUTTON + 4.0), panel.y + 8.0, VIEW_BUTTON, VIEW_BUTTON);
+        let id = super::ui::id_of(&format!("editor-view-{i}"));
+        let (hover, _, clicked) = l.ui.interact(id, r);
+        // (an eye of the bus counts whichever of its eyes is in use)
+        let on = std::mem::discriminant(&now) == std::mem::discriminant(view);
+        if on {
+            l.ui.p().rounded(r, 6.0, SELECTED);
+        } else if hover {
+            l.ui.p().rounded(r, 6.0, HOVER);
+        }
+        let c = if on { ACCENT } else if hover { TEXT } else { TEXT_DIM };
+        l.ui.icon(icon, r.center(), 19.0, c);
+        l.ui.tooltip(r, &format!("{} ({key})", omsi_ui::tr(name)));
+        if clicked {
+            l.showroom.set_view(*view);
+        }
+    }
 }
 
 fn buttons(l: &mut Launcher, panel: Rect) {

@@ -219,7 +219,9 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   so there is nothing there to fly out of. Dragging with the mouse turns whichever view is
   in use - round the bus outside, the head at an eye, the free camera on the spot - the
   **arrow keys** turn it as well, and the wheel zooms the outside view. Numpad 8 also brings
-  a free camera back to the outside view, which is the way out of having flown off.
+  a free camera back to the outside view, which is the way out of having flown off. The four
+  views are also a row of small buttons over the top left of the picture - *Driver's seat*,
+  *Saloon*, *Around the bus*, *Free camera* - each naming its key when the mouse rests on it.
 
   This page and the Drive page keep their own camera: turning the bus here leaves the card
   beside the bus list where it was. They share the one bus, so the editor running its scripts
