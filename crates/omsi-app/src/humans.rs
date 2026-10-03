@@ -109,6 +109,16 @@ impl Eye {
                 .cos(),
         }
     }
+
+    /// A wider picture than the camera's own (a triple screen's side panels): the tangents
+    /// of its half-angles, horizontal and vertical.
+    pub fn widened(mut self, extent: Option<(f64, f64)>) -> Eye {
+        if let Some((tan_x, tan_y)) = extent {
+            let half_diag = tan_x.hypot(tan_y).atan();
+            self.cos_half = self.cos_half.min((half_diag + 10f64.to_radians()).min(89f64.to_radians()).cos());
+        }
+        self
+    }
 }
 
 /// A bus as the passengers know it.
@@ -1946,13 +1956,13 @@ impl Humans {
     /// for them.
     /// Everybody on foot on the ground, for the traffic to stop for: position, velocity
     /// and whether they wait at a stop (a bus pulls up right beside those).
-    pub fn on_foot(&self) -> Vec<(DVec2, DVec2, bool)> {
+    pub fn on_foot(&self) -> Vec<(DVec3, DVec2, bool)> {
         self.people
             .iter()
             .filter(|p| p.place == Place::Ground)
             .map(|p| {
                 let waiting = matches!(&p.state, State::Pax(x) if x.inside.is_none());
-                (p.position.truncate(), p.vel, waiting)
+                (p.position, p.vel, waiting)
             })
             .collect()
     }

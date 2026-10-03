@@ -3512,12 +3512,30 @@ impl World {
     /// ([`TileLayout::sources_of`]), not by what else happens to be loaded, so a tile
     /// streamed in gets exactly the ground and the cut a whole-map load gives it.
     pub fn prepare_tiles(&self, tiles: &[(i32, i32, PathBuf)]) -> (Vec<Prepared>, LoadStats) {
+        self.prepare_tiles_impl(tiles, false)
+    }
+
+    /// Prepare the streamed map's first visible area with bounded diagnostics. This is kept
+    /// separate from normal streaming so an ordinary drive does not produce per-tile log I/O.
+    pub fn prepare_tiles_initial(&self, tiles: &[(i32, i32, PathBuf)]) -> (Vec<Prepared>, LoadStats) {
+        self.prepare_tiles_impl(tiles, true)
+    }
+
+    fn prepare_tiles_impl(&self, tiles: &[(i32, i32, PathBuf)], initial_diag: bool) -> (Vec<Prepared>, LoadStats) {
         let profile = omsi_cfg::env::var_os("OMSI_PROFILE").is_some();
         let t0 = std::time::Instant::now();
         let index = self.index();
         let layout = self.layout();
         let t1 = std::time::Instant::now();
         let keys: Vec<(i32, i32)> = tiles.iter().map(|t| (t.0, t.1)).collect();
+        if initial_diag {
+            log::info!(
+                "tile loading: first-area batch {} tile(s) {:?}: index/layout {:.2} s",
+                keys.len(),
+                keys,
+                (t1 - t0).as_secs_f64()
+            );
+        }
         // the batch needs the sources of every tile next to it (their placed surfaces go
         // into its cut)
         let mut wanted: Vec<(i32, i32)> = Vec::new();
@@ -3542,13 +3560,56 @@ impl World {
                 })
                 .collect()
         };
+        if initial_diag && !missing.is_empty() {
+            log::info!(
+                "tile loading: first-area batch needs {} staged dependency tile(s): {:?}",
+                missing.len(),
+                missing
+            );
+        }
         let fresh: Vec<((i32, i32), Arc<StagedTile>)> = missing
             .par_iter()
             .filter_map(|k| {
-                Some((
-                    *k,
-                    Arc::new(self.stage_tile(k.0, k.1, layout.paths.get(k)?, &index)),
-                ))
+                let path = layout.paths.get(k)?;
+                let started = std::time::Instant::now();
+                if initial_diag {
+                    log::info!(
+                        "tile loading: staging tile {},{} ({})",
+                        k.0,
+                        k.1,
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    );
+                }
+                let staged = Arc::new(self.stage_tile(k.0, k.1, path, &index));
+                let secs = started.elapsed().as_secs_f64();
+                if initial_diag {
+                    if secs >= 2.0 {
+                        log::warn!(
+                            "tile loading: slow stage tile {},{} ({}) took {:.2} s",
+                            k.0,
+                            k.1,
+                            path.file_name().unwrap_or_default().to_string_lossy(),
+                            secs
+                        );
+                    } else {
+                        log::info!(
+                            "tile loading: staged tile {},{} ({}) in {:.2} s",
+                            k.0,
+                            k.1,
+                            path.file_name().unwrap_or_default().to_string_lossy(),
+                            secs
+                        );
+                    }
+                } else if secs >= 5.0 {
+                    log::warn!(
+                        "tile streaming: staging tile {},{} ({}) took {:.2} s",
+                        k.0,
+                        k.1,
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        secs
+                    );
+                }
+                Some((*k, staged))
             })
             .collect();
         // what this batch works with, held here: the cache may drop entries meanwhile
@@ -3563,18 +3624,70 @@ impl World {
                 .collect()
         };
         let t2 = std::time::Instant::now();
+        if initial_diag {
+            log::info!(
+                "tile loading: first-area staging finished in {:.2} s ({} dependency tile(s) read now)",
+                (t2 - t1).as_secs_f64(),
+                missing.len()
+            );
+        }
         let stats = Mutex::new(LoadStats {
             tiles: tiles.len(),
             ..Default::default()
         });
         let mut prepared: Vec<Prepared> = keys
             .par_iter()
-            .filter_map(|k| self.place_tile(*k, &staged, &layout, &stats))
+            .filter_map(|k| {
+                let started = std::time::Instant::now();
+                if initial_diag {
+                    log::info!("tile loading: placing tile {},{}", k.0, k.1);
+                }
+                let out = self.place_tile(*k, &staged, &layout, &stats);
+                let secs = started.elapsed().as_secs_f64();
+                if initial_diag {
+                    if secs >= 2.0 {
+                        log::warn!("tile loading: slow place tile {},{} took {:.2} s", k.0, k.1, secs);
+                    } else {
+                        log::info!("tile loading: placed tile {},{} in {:.2} s", k.0, k.1, secs);
+                    }
+                } else if secs >= 5.0 {
+                    log::warn!("tile streaming: placing tile {},{} took {:.2} s", k.0, k.1, secs);
+                }
+                out
+            })
             .collect();
         let t3 = std::time::Instant::now();
+        if initial_diag {
+            log::info!(
+                "tile loading: first-area placement finished in {:.2} s; cutting terrain/textures",
+                (t3 - t2).as_secs_f64()
+            );
+        }
         self.cut_terrain(&mut prepared, &staged, &layout);
-        if profile {
-            log::info!("prepare {} tiles ({} staged, {} read now): index {:.2} s, read {:.2} s, place {:.2} s, cut + textures {:.2} s", tiles.len(), staged.len(), missing.len(), (t1 - t0).as_secs_f64(), (t2 - t1).as_secs_f64(), (t3 - t2).as_secs_f64(), t3.elapsed().as_secs_f64());
+        let cut_secs = t3.elapsed().as_secs_f64();
+        if initial_diag {
+            let total = t0.elapsed().as_secs_f64();
+            if total >= 2.0 {
+                log::warn!(
+                    "tile loading: first-area batch prepared in {:.2} s: index/layout {:.2}, stage {:.2}, place {:.2}, cut/textures {:.2}",
+                    total,
+                    (t1 - t0).as_secs_f64(),
+                    (t2 - t1).as_secs_f64(),
+                    (t3 - t2).as_secs_f64(),
+                    cut_secs
+                );
+            } else {
+                log::info!(
+                    "tile loading: first-area batch prepared in {:.2} s: index/layout {:.2}, stage {:.2}, place {:.2}, cut/textures {:.2}",
+                    total,
+                    (t1 - t0).as_secs_f64(),
+                    (t2 - t1).as_secs_f64(),
+                    (t3 - t2).as_secs_f64(),
+                    cut_secs
+                );
+            }
+        } else if profile {
+            log::info!("prepare {} tiles ({} staged, {} read now): index {:.2} s, read {:.2} s, place {:.2} s, cut + textures {:.2} s", tiles.len(), staged.len(), missing.len(), (t1 - t0).as_secs_f64(), (t2 - t1).as_secs_f64(), (t3 - t2).as_secs_f64(), cut_secs);
         }
         let stats = stats.into_inner();
         (prepared, stats)
@@ -7707,7 +7820,7 @@ impl World {
                     continue;
                 }
                 let atlas = self.fonts.lock().get(&tt.font, &|p| omsi_texture::decode_file(p).ok().map(|i| (i.width, i.height, i.rgba)));
-                let image = scenery_text_image(tt, atlas, &text);
+                let image = helper_text_image(tt, atlas.as_deref(), &text).unwrap_or_else(|| scenery_text_image(tt, atlas, &text));
                 let tex = gpu.add_image(renderer, scene, &image, true);
                 let mat = renderer.add_material(scene, Some(tex), alpha, [1.0; 4], false);
                 let mat = gpu.material(renderer, scene, mat);
@@ -10047,6 +10160,54 @@ fn scenery_text_image(
         rgba: state.image(text),
         has_alpha: true,
     }
+}
+
+/// The text of one of the game's own helper objects (the route arrows' street and stop
+/// names) that its `.oft` font cannot draw: the stock arrows ask for the font "test"
+/// (`Fonts/test1.oft`), which has the Latin letters and German umlauts only, so a street
+/// or a stop named in Cyrillic (or Greek, Chinese ...) came out as an empty arrow - at
+/// most a stray `Ä` where a code page variant of `Д` happened to be in the font. Such a
+/// text is drawn with the interface font (Roboto, then the system's fonts for the
+/// scripts it lacks) in the texture's colour, the height of the `.oft` font's letters,
+/// centred, and narrowed to the texture's width. None when the font draws every letter:
+/// that text keeps OMSI's own look.
+fn helper_text_image(tt: &omsi_model::TextTexture, atlas: Option<&omsi_content::font::FontAtlas>, text: &str) -> Option<Image> {
+    let drawable = |c: char| c.is_whitespace() || atlas.is_some_and(|a| a.font.glyph(c).is_some());
+    if text.trim().is_empty() || text.chars().all(drawable) {
+        return None;
+    }
+    static FONTS: std::sync::OnceLock<omsi_ui::Fonts> = std::sync::OnceLock::new();
+    let fonts = FONTS.get_or_init(omsi_ui::Fonts::new);
+    let (w, h) = (tt.width.max(1) as u32, tt.height.max(1) as u32);
+    // (the .oft's line height holds its capitals and the gap below them; Roboto's capitals
+    // are 0.7 of its size, so nearly the line height gives letters of the same height)
+    let line = atlas.map(|a| a.font.height.max(8) as f32).unwrap_or(h as f32 * 0.2);
+    let px = (line * 0.95).min(h as f32);
+    let bmp = fonts.render(text.trim(), px, omsi_ui::Weight::Medium);
+    // too long for the texture: narrowed to fit (columns sampled), the height kept
+    let scale = (w as f32 / bmp.w as f32).min(1.0);
+    let out_w = ((bmp.w as f32 * scale).floor() as u32).max(1);
+    let x0 = (w - out_w.min(w)) / 2;
+    let y0 = (h as i32 - bmp.h as i32) / 2;
+    let rgb = if tt.full_color { [255u8; 3] } else { [tt.color[0] as u8, tt.color[1] as u8, tt.color[2] as u8] };
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for y in 0..bmp.h as i32 {
+        let dy = y0 + y;
+        if dy < 0 || dy >= h as i32 {
+            continue;
+        }
+        for x in 0..out_w.min(w) {
+            let sx = ((x as f32 + 0.5) / scale) as u32;
+            let a = bmp.alpha[(y as u32 * bmp.w + sx.min(bmp.w - 1)) as usize];
+            if a == 0 {
+                continue;
+            }
+            let i = ((dy as u32 * w + x0 + x) * 4) as usize;
+            rgba[i..i + 3].copy_from_slice(&rgb);
+            rgba[i + 3] = a;
+        }
+    }
+    Some(Image { width: w, height: h, rgba, has_alpha: true })
 }
 
 /// Identify a solid vehicle body material that should participate in the depth buffer.
@@ -12500,6 +12661,39 @@ pub(crate) fn resolve_scenery_freetex_name<'a>(
 mod tests {
     use super::*;
 
+    /// A route arrow's Cyrillic street name with the stock Latin-only "test" font: drawn
+    /// with the interface font (it was an empty texture); a Latin one keeps the .oft.
+    #[test]
+    fn a_helper_text_the_font_cannot_draw_comes_from_the_interface_font() {
+        use omsi_content::font::{Font, FontAtlas, FontChar};
+        // a Latin font with its umlauts (`Ä` is `Д` in code page 1251, so one Cyrillic
+        // letter alone is "in" the font)
+        let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÄÖÜäöüß"
+            .chars()
+            .enumerate()
+            .map(|(k, ch)| FontChar { ch, x0: k as i32 * 4, x1: k as i32 * 4 + 3, y: 0 })
+            .collect();
+        let font = Font { path: PathBuf::new(), name: "test".into(), bitmap: String::new(), alpha: String::new(), height: 27, gap: 1, chars };
+        let (aw, ah) = (256u32, 32u32);
+        let atlas = FontAtlas::new(font, aw, ah, vec![255; (aw * ah * 4) as usize], vec![255; (aw * ah * 4) as usize]);
+        let tt = omsi_model::TextTexture { variable: "0".into(), font: "test".into(), width: 128, height: 128, full_color: false, color: [255.0, 0.0, 0.0], orientation: 0, grid: 1 };
+        assert!(helper_text_image(&tt, Some(&atlas), "Bauernhof").is_none());
+        assert!(helper_text_image(&tt, Some(&atlas), "  ").is_none());
+        for text in ["Улица Ленина", "Булевар ослобођења", "Δ"] {
+            let img = helper_text_image(&tt, Some(&atlas), text).unwrap_or_else(|| panic!("{text}: drawn with the .oft"));
+            assert_eq!((img.width, img.height), (128, 128));
+            let ink: Vec<usize> = (0..128 * 128).filter(|&p| img.rgba[p * 4 + 3] > 128).collect();
+            assert!(ink.len() > 40, "{text}: {} pixels", ink.len());
+            assert!(ink.iter().all(|&p| img.rgba[p * 4..p * 4 + 3] == [255, 0, 0]), "{text}: in the texture's colour");
+            // centred, and a long name narrowed into the texture
+            let rows: Vec<usize> = ink.iter().map(|p| p / 128).collect();
+            let (top, bottom) = (*rows.iter().min().unwrap(), *rows.iter().max().unwrap());
+            assert!(top > 40 && bottom < 88, "{text}: rows {top}..{bottom}");
+        }
+        // no font at all (missing from the installation): still readable
+        assert!(helper_text_image(&tt, None, "Bauernhof").is_some());
+    }
+
     #[test]
     fn nightlight_follows_the_objects_darkness_threshold() {
         let day = DayKind { workday: true, ..Default::default() };
@@ -13095,7 +13289,7 @@ mod material_tests {
         ];
         let alpha = material_alpha(&mats, 0, &defs);
         assert_eq!(alpha, AlphaMode::Opaque);
-        assert_eq!(Renderer::clamp_slot_alpha(0.35, alpha), 1.0);
+        assert_eq!(Renderer::clamp_slot_alpha(0.35, alpha, false), 1.0);
     }
 
     #[test]
@@ -13156,6 +13350,19 @@ mod material_tests {
             true,
             true
         ));
+    }
+
+    /// The ICU400 controller's screen layer: a script texture as its transmap declares one.
+    #[test]
+    fn script_transmap_is_declared() {
+        let text = "[mesh]\nscreen.o3d\n\n[matl]\nScreen.dds\n0\n[matl_transmap]\n\\S:1\n[alphascale]\nsignController_alphaScale\n[matl_alpha]\n2\n\n[matl]\nPlain.dds\n0\n";
+        let m = omsi_model::Model::parse(&omsi_cfg::CfgFile::from_str("model.cfg", text));
+        let mats = &m.meshes[0].materials;
+        let screen = mats.iter().find(|d| d.texture == "Screen.dds").unwrap();
+        let plain = mats.iter().find(|d| d.texture == "Plain.dds").unwrap();
+        assert_eq!(screen.transmap.as_deref(), Some("\\S:1"));
+        assert!(material_extra(&[screen], None, None, [0.0; 4]).transmap_declared);
+        assert!(!material_extra(&[plain], None, None, [0.0; 4]).transmap_declared);
     }
 
     #[test]

@@ -90,8 +90,8 @@ impl App {
             // R puts the mirror under the cursor back as the bus has it, Shift+R every mirror
             if self.mirror_hud.editing() && code == KeyCode::KeyR {
                 if pressed && !repeat {
-                    let size = self.surface.as_ref().map(|s| (s.config.width as f32, s.config.height as f32)).unwrap_or((1.0, 1.0));
-                    let which = self.mirror_hud.cam_under(self.cursor, size);
+                    let size = self.hud_size();
+                    let which = self.mirror_hud.cam_under(self.hud_cursor(), size);
                     let msg = match self.player.as_mut() {
                         Some(p) if shift => {
                             let n = p.vehicle.ty.def.cameras_reflexion.len();
@@ -123,9 +123,9 @@ impl App {
             }
             if self.mirror_hud.editing() && matches!(code, KeyCode::Insert | KeyCode::Delete | KeyCode::Backspace | KeyCode::KeyC | KeyCode::Escape) {
                 if pressed && !repeat {
-                    let size = self.surface.as_ref().map(|s| (s.config.width as f32, s.config.height as f32)).unwrap_or((1.0, 1.0));
+                    let size = self.hud_size();
                     if let Some(p) = self.player.as_ref() {
-                        if let Some(msg) = self.mirror_hud.key(code, p, self.cursor, size) {
+                        if let Some(msg) = self.mirror_hud.key(code, p, self.hud_cursor(), size) {
                             self.service_msg = Some((msg, 4.0));
                         }
                     }
@@ -205,7 +205,9 @@ impl App {
             }
             // Alt+Enter: full screen on and off
             if pressed && !repeat && matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) && (self.keys.contains(&KeyCode::AltLeft) || self.keys.contains(&KeyCode::AltRight)) {
-                if let Some(win) = self.window.as_ref() {
+                if self.spanned {
+                    log::info!("triple screen: the window spans three monitors, Alt+Enter is left alone");
+                } else if let Some(win) = self.window.as_ref() {
                     win.set_fullscreen(if win.fullscreen().is_some() { None } else { Some(winit::window::Fullscreen::Borderless(None)) });
                 }
                 return;
@@ -611,7 +613,11 @@ impl App {
     /// vehicle for each of them.
     pub(crate) fn tick_lan(&mut self, dt: f32) {
         let walker = self.walker_pose();
-        let Some(lan) = self.lan.as_mut() else { return };
+        let Some(lan) = self.lan.as_mut() else {
+            // (the session is over: the plugin is told so)
+            self.voice = None;
+            return;
+        };
         let duty = self
             .duty
             .as_ref()
@@ -648,6 +654,7 @@ impl App {
         for (from, text) in cmds {
             self.lan_command(from, &text);
         }
+        self.tick_voice(dt);
     }
 
     /// A command another player's game sent ours (`LanSession::command`).
@@ -667,7 +674,63 @@ impl App {
             }
             return;
         }
+        // the voice server of the session (`voice`): asked of the host, told by it
+        if text == "voice?" {
+            if lan.role == omsi_net::Role::Host {
+                let answer = crate::voice::VoiceServer::command(crate::voice::hosted().as_ref());
+                if let Some(l) = self.lan.as_mut() {
+                    l.command(from, &answer);
+                }
+            }
+            return;
+        }
+        if text.starts_with("voice ") {
+            if from == 1 {
+                if let (Some(v), Some(server)) = (self.voice.as_mut(), crate::voice::VoiceServer::parse_command(text)) {
+                    v.set_server(server);
+                }
+            }
+            return;
+        }
         crate::admin::command(self, from, text);
+    }
+
+    /// The voice chat (`voice`), once a frame of a session: started with it when the
+    /// settings allow, the host's voice server asked for, the plugin told who is where.
+    fn tick_voice(&mut self, dt: f32) {
+        let Some(lan) = self.lan.as_mut() else {
+            self.voice = None;
+            return;
+        };
+        // (a dedicated server has nobody to talk at its place; a joining game that lost
+        // its host is in no session to talk in)
+        if !self.settings.voice_chat || self.args.server.is_some() || !lan.connected {
+            self.voice = None;
+            return;
+        }
+        let v = self.voice.get_or_insert_with(|| crate::voice::Voice::new(crate::voice::DEFAULT_PORT));
+        match lan.role {
+            omsi_net::Role::Host => {
+                // (once: hosted() reads voice.cfg)
+                if !v.known() {
+                    v.set_server(crate::voice::hosted());
+                }
+            }
+            omsi_net::Role::Client => {
+                if lan.connected && v.should_ask(dt) {
+                    lan.command(1, "voice?");
+                }
+            }
+        }
+        let lan = self.lan.as_ref().unwrap();
+        let my_bus = self.player.as_ref().map(|p| p.vehicle.position);
+        let others = crate::voice::speakers(lan, &self.remotes, my_bus);
+        let inside = if self.in_cab { Some(lan.my_id) } else { self.inside_remote };
+        let listener = self.camera.as_ref().map(|c| crate::voice::Listener { at: c.position, yaw: c.yaw, inside });
+        let me = (lan.my_name.clone(), lan.my_id);
+        if let Some(v) = self.voice.as_mut() {
+            v.tick(dt, (&me.0, me.1), listener, &others);
+        }
     }
 
     /// The host's world as LAN play asks for it: its clock (set or caught up with) and its
@@ -896,8 +959,9 @@ impl App {
         // a mirror panel being dragged follows the cursor (nothing else of the cursor's
         // work is done meanwhile, and outside a drag none of it is touched)
         if self.mirror_hud.dragging() {
-            if let Some(size) = self.surface.as_ref().map(|s| (s.config.width as f32, s.config.height as f32)) {
-                if self.mirror_hud.moved((x, y), size) {
+            if let Some(size) = self.surface.as_ref().map(|_| self.hud_size()) {
+                let origin_x = self.cursor.0 - self.hud_cursor().0;
+                if self.mirror_hud.moved((x - origin_x, y), size) {
                     self.cursor = (x, y);
                     return;
                 }
@@ -1521,6 +1585,18 @@ impl App {
                     let (dx, dy) = xy();
                     self.look_by(dx, dy);
                 }
+                // `focus 0|1`, `minimize`, `restore`: the window losing and getting back the
+                // keyboard and the mouse, as the window's own events do it
+                "focus" if arg == "0" => self.input_lost(),
+                "focus" => self.input_back(),
+                "minimize" => {
+                    self.window_hidden = true;
+                    self.input_lost();
+                }
+                "restore" => {
+                    self.window_hidden = false;
+                    self.input_back();
+                }
                 "key" | "keydown" | "keyup" => {
                     let Some(code) = Self::script_key(arg) else {
                         log::warn!("input script: unknown key {arg}");
@@ -1634,6 +1710,20 @@ impl App {
         // the menu takes the keys, their key-ups too: what is held now is let go here, or a
         // steering key let go in the menu went on turning the wheel to full lock once the
         // menu closed (a throttle key went on accelerating, a door button stayed pressed)
+        self.release_vehicle_keys();
+        if self.lan.is_none() {
+            self.paused = true;
+        }
+        self.game_menu = Some(0);
+        self.menu_top = None;
+        self.menu_kbd = true;
+        self.menu_drag = None;
+    }
+
+    /// Let go of every key the vehicle holds: the keyboard's driving keys and pedals, the
+    /// vehicle keys of `Inputs/keyboard.cfg` (their `<trigger>_off` fires) and the
+    /// Shift+number door buttons.
+    pub(crate) fn release_vehicle_keys(&mut self) {
         if let Some(p) = self.player.as_mut() {
             let held: Vec<_> = p.held_keys.keys().copied().collect();
             for scan in held {
@@ -1644,13 +1734,40 @@ impl App {
                 p.door_key_off(&fired);
             }
         }
-        if self.lan.is_none() {
-            self.paused = true;
+        self.door_key_triggers.clear();
+    }
+
+    /// The window lost the keyboard and the mouse (focus gone to another window, minimised,
+    /// hidden, a phone sending the app to the background): no key-up or button-up comes for
+    /// what is held now, so all of it is let go here - the vehicle's keys, a switch held
+    /// with the mouse, looking round, the mouse's zoom - and the mouse steering holds the
+    /// wheel and the brake where they are with its throttle off. Until the window has the
+    /// focus again the mouse and the keyboard work nothing (see `input_away`). A game
+    /// controller's axes stay theirs.
+    pub(crate) fn input_lost(&mut self) {
+        self.input_away = true;
+        self.release_vehicle_keys();
+        self.keys.clear();
+        if let Some(p) = self.player.as_mut() {
+            p.release();
         }
-        self.game_menu = Some(0);
-        self.menu_top = None;
-        self.menu_kbd = true;
-        self.menu_drag = None;
+        self.dragging = false;
+        self.buttons_held = (false, false);
+        self.both_drag = None;
+        self.mouse_look = false;
+        self.steer_cursor = None;
+        self.mouse_pedals.0 = 0.0;
+    }
+
+    /// The window has the focus again: the mouse steering eases from where the wheel stands
+    /// to the cursor (as when it is switched on) instead of jumping there. A key still held
+    /// from before counts only once it is pressed again.
+    pub(crate) fn input_back(&mut self) {
+        if !self.input_away {
+            return;
+        }
+        self.input_away = false;
+        self.mouse_steer = (self.player.as_ref().map(|p| p.vehicle.physics.controls.steering).unwrap_or(0.0), 1.0);
     }
 
     pub(crate) fn close_game_menu(&mut self) {
@@ -2496,7 +2613,7 @@ impl App {
             return true;
         }
         let (Some(cam), Some(s), Some(world)) = (self.camera.as_ref(), self.surface.as_ref(), self.world.clone()) else { return true };
-        let (o, d) = cursor_ray(cam, self.cursor.0, self.cursor.1, s.config.width as f32, s.config.height as f32);
+        let (o, d) = self.world_cursor_ray(cam, (s.config.width, s.config.height));
         let ed = self.editor.as_mut().unwrap();
         // (the copy being edited stays the one dragged while it is under the cursor)
         let on_added = ed.editing_added.and_then(|k| ed.added.get(k)).map(|a| {
@@ -2519,7 +2636,7 @@ impl App {
             return;
         }
         let (Some(cam), Some(s), Some(world)) = (self.camera.as_ref(), self.surface.as_ref(), self.world.clone()) else { return };
-        let (o, d) = cursor_ray(cam, self.cursor.0, self.cursor.1, s.config.width as f32, s.config.height as f32);
+        let (o, d) = self.world_cursor_ray(cam, (s.config.width, s.config.height));
         let Some(hit) = crate::placing::ground_hit(&world, o, d.as_dvec3(), 400.0) else { return };
         let (Some(r), Some(scene), Some(ed)) = (self.renderer.as_ref(), self.scene.as_mut(), self.editor.as_mut()) else { return };
         if let Some(m) = ed.drag_to(&world, r, scene, hit) {
@@ -3166,6 +3283,10 @@ impl App {
         let Ok(exe) = std::env::current_exe() else { return false };
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("--root").arg(&self.args.root).arg("--no-menu").arg("--situation").arg(&file);
+        // (the duty typed by itself goes on being typed: `--autostart` with a situation)
+        if self.player.as_ref().is_some_and(|p| p.duty_typed) {
+            cmd.arg("--autostart");
+        }
         match cmd.spawn() {
             Ok(_) => {
                 log::info!("loading {} in a new game", file.display());
@@ -3279,6 +3400,14 @@ impl App {
             "view_set_driver" => self.view = "driver".into(),
             "view_set_passenger" => self.view = "pax".into(),
             "view_set_outside" => self.view = "outside".into(),
+            // the cabin (the driver's or the passenger's) and the outside, one press apart:
+            // what a single button on a controller wants. `view_toggle_viewpoint` is the
+            // four-mode cycle, with the map in it, and stays where it is.
+            "view_toggle_interior" => {
+                if !self.ego {
+                    self.view = if self.view == "outside" { "driver".into() } else { "outside".into() };
+                }
+            }
             "view_set_map" => {
                 // OMSI's map view (F4) is a camera flown over the map; the city map of the
                 // navigator stays on Shift+M
@@ -3569,6 +3698,10 @@ impl App {
         let Ok(exe) = std::env::current_exe() else { return false };
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("--root").arg(&self.args.root).arg("--no-menu").arg("--situation").arg(&file);
+        // (the duty typed by itself goes on being typed: `--autostart` with a situation)
+        if self.player.as_ref().is_some_and(|p| p.duty_typed) {
+            cmd.arg("--autostart");
+        }
         cmd.env("OMSI_SAFE_GPU", (n + 1).to_string());
         // (on Windows the other interface: DirectX 12 after Vulkan, Vulkan after DirectX 12 -
         // an AMD Radeon's DX12 driver lost the device where its Vulkan one did not, #274)
@@ -3680,13 +3813,70 @@ impl App {
         }
     }
 
+    pub(crate) fn hud_size(&self) -> (f32, f32) {
+        let v = self
+            .surface
+            .as_ref()
+            .map(|s| {
+                self.settings
+                    .hud_viewport((s.config.width, s.config.height))
+            })
+            .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+        (v[2], v[3])
+    }
+
+    pub(crate) fn hud_cursor(&self) -> (f32, f32) {
+        let x = self
+            .surface
+            .as_ref()
+            .map(|s| {
+                self.settings
+                    .hud_viewport((s.config.width, s.config.height))[0]
+            })
+            .unwrap_or(0.0);
+        (self.cursor.0 - x, self.cursor.1)
+    }
+
     pub(crate) fn cockpit_cursor_ray(&self, cam: &Camera, size: (u32, u32)) -> (glam::DVec3, glam::Vec3, f32) {
         #[cfg(windows)]
         if let Some(ray) = self.vr.as_ref().and_then(|vr| vr.cursor_ray(self.cursor.0, self.cursor.1, size)) {
             return (ray.0, ray.1, ray.2 * 6.0);
         }
+        if let Some(rig) = self.triple_rig(size) {
+            let (o, d, spread) = rig.cursor_ray(cam, self.cursor, size);
+            return (o, d, spread * 6.0);
+        }
         let (o, d) = cursor_ray(cam, self.cursor.0, self.cursor.1, size.0 as f32, size.1 as f32);
         (o, d, pixel_angle(cam, size.1 as f32) * 6.0)
+    }
+
+    /// The triple screen's rig as drawn this frame (the view's zoom applied), while it is on
+    /// and no headset is asked for.
+    pub(crate) fn triple_rig(&self, size: (u32, u32)) -> Option<omsi_render::TripleScreen> {
+        (self.settings.triple.enabled && !self.settings.vr_requested()).then(|| {
+            self.settings.triple.zoomed(size.0, size.1, self.view_zoom.get(&self.view).copied().unwrap_or(1.0))
+        })
+    }
+
+    /// The desktop ray under the cursor for placing and editing on the ground: the window's
+    /// own projection, or the triple screen panel's under the cursor.
+    pub(crate) fn world_cursor_ray(&self, cam: &Camera, size: (u32, u32)) -> (glam::DVec3, glam::Vec3) {
+        match self.triple_rig(size) {
+            Some(rig) => {
+                let (o, d, _) = rig.cursor_ray(cam, self.cursor, size);
+                (o, d)
+            }
+            None => cursor_ray(cam, self.cursor.0, self.cursor.1, size.0 as f32, size.1 as f32),
+        }
+    }
+
+    /// With a triple screen, the frustum around all three panels for "nothing appears or
+    /// vanishes in sight": tangents of its half-angles, horizontal and vertical (None: the
+    /// window's own view is the whole picture).
+    pub(crate) fn sight_extent(&self, cam: &Camera, size: (u32, u32)) -> Option<(f64, f64)> {
+        let rig = self.triple_rig(size)?;
+        let (tx, ty) = rig.view_extent(cam, size.0, size.1);
+        Some((tx as f64, ty as f64))
     }
 
     pub(crate) fn update_hover(&mut self) {

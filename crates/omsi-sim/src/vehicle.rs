@@ -19,6 +19,54 @@ fn script_speed(speed_kmh: f32) -> f32 {
     if speed_kmh.abs() < 0.01 { 0.0 } else { speed_kmh }
 }
 
+// A vehicle pack may contain many tiny trim meshes and only a few large body/interior
+// meshes. When the mesh vote is close, use capped triangle counts as a tie-breaker instead
+// of letting every tiny mesh carry the same weight.
+const WINDING_EVIDENCE_CAP: usize = 4096;
+
+fn keep_authored_winding(
+    forward_meshes: usize,
+    backward_meshes: usize,
+    forward_weight: usize,
+    backward_weight: usize,
+) -> bool {
+    if forward_meshes > backward_meshes {
+        return true;
+    }
+    if forward_meshes == 0 || backward_meshes == 0 {
+        return false;
+    }
+    let counts_close = forward_meshes.saturating_mul(5) >= backward_meshes.saturating_mul(4);
+    let forward_clearly_heavier =
+        forward_weight.saturating_mul(10) >= backward_weight.saturating_mul(11);
+    counts_close && forward_clearly_heavier
+}
+
+#[derive(Default, Debug)]
+struct WindingVotes {
+    forward: usize,
+    backward: usize,
+    forward_weight: usize,
+    backward_weight: usize,
+}
+
+impl WindingVotes {
+    fn record(&mut self, forward: bool, triangles: usize) {
+        let weight = triangles.min(WINDING_EVIDENCE_CAP);
+        if forward {
+            self.forward += 1;
+            self.forward_weight += weight;
+        } else {
+            self.backward += 1;
+            self.backward_weight += weight;
+        }
+    }
+
+    fn keep_authored(&self) -> bool {
+        keep_authored_winding(self.forward, self.backward, self.forward_weight, self.backward_weight)
+    }
+}
+
 /// Built-in variables every road vehicle has (`program/varlist_roadvehicle.txt` + generated).
 pub fn builtin_vars(root: &Path) -> Vec<String> {
     let mut v: Vec<String> =
@@ -336,7 +384,7 @@ impl VehicleType {
         let mut missing_packs: Vec<(String, usize)> = Vec::new();
         // (by the vehicle pack each mesh comes from, see `winding_pack`)
         let mut turned: Vec<(usize, String)> = Vec::new();
-        let mut votes: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+        let mut votes: std::collections::HashMap<String, WindingVotes> = std::collections::HashMap::new();
         if !model.lods.is_empty() {
             let start = model.lods[0].first_mesh;
             let end = model
@@ -377,8 +425,7 @@ impl VehicleType {
                         let skin = if skin.iter().any(|b| b.def_index.is_some()) { skin } else { Vec::new() };
                         let pack = winding_pack(&p);
                         match omsi_geometry::positive_det_faces_forward(&m) {
-                            Some(true) => votes.entry(pack.clone()).or_default().0 += 1,
-                            Some(false) => votes.entry(pack.clone()).or_default().1 += 1,
+                            Some(forward) => votes.entry(pack.clone()).or_default().record(forward, m.triangles.len()),
                             None => {}
                         }
                         if omsi_geometry::turns_round(&m) {
@@ -415,8 +462,7 @@ impl VehicleType {
         // exporter does: the same Atron machine inside out in some buses only (#977, #1054).
         let mut kept = 0;
         for (i, pack) in &turned {
-            let (forward, backward) = votes.get(pack).copied().unwrap_or_default();
-            if forward > backward {
+            if votes.get(pack).is_some_and(WindingVotes::keep_authored) {
                 omsi_geometry::reverse_winding(&mut meshes[*i].data);
                 meshes[*i].keep_winding = true;
                 kept += 1;
@@ -1219,6 +1265,56 @@ impl VehicleInstance {
         }
     }
 
+    /// Restore a situation without running scripts against an incomplete host. Nothing is
+    /// ticked here: the caller attaches the timetable callbacks (`PlayerDuty::resume`) and
+    /// then runs the frames, the first of which rebuilds the displays from the restored
+    /// state. Returns how many numeric and string variables the program knew.
+    pub fn restore_script_state(
+        &mut self,
+        vars: &[(String, f32)],
+        strings: &[(String, String)],
+    ) -> (usize, usize) {
+        let mut numeric = 0;
+        let mut textual = 0;
+        for (name, value) in vars {
+            numeric += usize::from(self.set_var(name, *value));
+            if name.eq_ignore_ascii_case("Dirt_Norm") {
+                self.dirt = value.clamp(0.0, 1.0);
+            }
+        }
+        for (name, value) in strings {
+            if let Some(i) = self.ty.program.str_var(name) {
+                self.state.str_vars[i as usize] = value.clone();
+                textual += 1;
+            }
+        }
+        // Text images are per instance. An unchanged string still needs an upload when
+        // a snapshot is applied to a vehicle whose previous images were already synced.
+        for t in &mut self.text_textures {
+            t.last_text = None;
+        }
+        for part in &mut self.trailers {
+            for t in &mut part.text_textures {
+                t.last_text = None;
+            }
+        }
+        // The stock bitmap matrices - Script/Matrix.osc of the MAN_SD200/SD202 and
+        // Matrix_D.osc / VMatrix*.osc of the MAN_NL_NG (EN92, GN92) - redraw their
+        // script texture only when the IBIS line or terminus differs from
+        // Matrix_Nr_Last / Matrix_TerminusIndex_Last. The texture is not in an .osn, so
+        // the saved "last" values would leave this fresh instance's matrix blank: they
+        // are reset to force one redraw. Text/roller displays keep all their saved
+        // state; no destination or power trigger is fired here.
+        if !self.host.script_textures.is_empty()
+            && self.ty.program.macro_block("Matrix_frame").is_some()
+        {
+            self.set_var("Matrix_Nr_Last", -1.0);
+            self.set_var("Matrix_TerminusIndex_Last", -1.0);
+        }
+        self.update_visuals(0.0);
+        (numeric, textual)
+    }
+
     /// Prepare the text textures with fonts from `lib`.
     pub fn init_text_textures(
         &mut self,
@@ -1243,6 +1339,20 @@ impl VehicleInstance {
             .unwrap_or_default()
     }
 
+    /// The string a `[texttexture]` names: its first field is either a script variable's name
+    /// or - as the Chinese AI cars write it, `[texttexture] 0 CN_REG ...` - the *number* of a
+    /// built-in string (`program/stringvarlist_roadvehicle.txt`: 0 ident, 1 number, ...).
+    /// Omsi.exe takes a number as that index (the scenery objects' `[texttexture]` do the same,
+    /// see `resolve_scenery_freetex_name`); taken for a variable's name it matches nothing and
+    /// the plate stays empty. See `Program::text_texture_var`.
+    pub fn text_texture_string(&self, field: &str) -> String {
+        self.ty
+            .program
+            .text_texture_var(field)
+            .map(|i| self.state.str_vars[i as usize].clone())
+            .unwrap_or_default()
+    }
+
     /// Re-render changed text textures; returns the indices with a pending image.
     pub fn update_text_textures(&mut self) -> Vec<usize> {
         let mut changed = Vec::new();
@@ -1251,8 +1361,8 @@ impl VehicleInstance {
             self.state.vars[id as usize] = 0.0;
         }
         for i in 0..self.text_textures.len() {
-            let var = self.text_textures[i].def.variable.clone();
-            let text = self.str_var(&var);
+            let field = self.text_textures[i].def.variable.clone();
+            let text = self.text_texture_string(&field);
             if self.text_textures[i].update(&text) {
                 changed.push(i);
             }
@@ -1835,8 +1945,41 @@ impl VehicleInstance {
 
     pub fn trigger(&mut self, name: &str) -> bool {
         let p = self.ty.program.clone();
-        self.vm
-            .run_trigger(&p, name, &mut self.state, &mut self.host)
+        let rear_target_was_open = self.var("doorTarget_23").is_some_and(|target| target > 0.0);
+        let rear_force_close_was_active = self.var("bdoor_embtn_cls").is_some_and(|close| close > 0.5);
+        let rear_was_open = self.var("doorTarget_23").is_some_and(|target| target > 0.0)
+            || self.var("door_2").is_some_and(|door| door > 0.05)
+            || self.var("door_3").is_some_and(|door| door > 0.05);
+        let mut fired = self
+            .vm
+            .run_trigger(&p, name, &mut self.state, &mut self.host);
+        // Several Volvo Wright door scripts expose the actual force-close operation as
+        // `bus_dooraft1_external_CL`, while the dashboard `bus_dooraftclose` trigger only
+        // sounds the button when its handbrake guard rejects the request.  Use that explicit
+        // close path when the dashboard request left the rear door open.  Other buses are
+        // unaffected because the fallback trigger is only present in those scripts.
+        // A toggle pressed while the leaves are already closing is an open request.  The
+        // fallback must not immediately undo that request just because the leaves are still
+        // physically open for a few frames.
+        let toggle_is_reopen_request = name.eq_ignore_ascii_case("bus_dooraft")
+            && !rear_target_was_open
+            && (rear_force_close_was_active || self.var("doorTarget_23").is_some_and(|target| target > 0.0));
+        if (name.eq_ignore_ascii_case("bus_dooraftclose")
+            || (name.eq_ignore_ascii_case("bus_dooraft") && !toggle_is_reopen_request))
+            && rear_was_open
+            && (self.var("doorTarget_23").is_some_and(|target| target > 0.0)
+                || self.var("door_2").is_some_and(|door| door > 0.05)
+                || self.var("door_3").is_some_and(|door| door > 0.05))
+            && p.trigger("bus_dooraft1_external_CL").is_some()
+        {
+            fired |= self.vm.run_trigger(
+                &p,
+                "bus_dooraft1_external_CL",
+                &mut self.state,
+                &mut self.host,
+            );
+        }
+        fired
     }
 
     /// The script variables as `names` would leave them, run one after another, with the
@@ -3431,7 +3574,7 @@ impl TrailerPart {
     pub fn update_text_textures(&mut self, main: &VehicleInstance) -> Vec<usize> {
         let mut changed = Vec::new();
         for (i, t) in self.text_textures.iter_mut().enumerate() {
-            let text = main.str_var(&t.def.variable);
+            let text = main.text_texture_string(&t.def.variable);
             if t.update(&text) {
                 changed.push(i);
             }
@@ -4015,6 +4158,7 @@ pub fn skin_vertices(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn a_borrowed_part_is_judged_with_its_own_pack() {
@@ -4029,6 +4173,168 @@ mod tests {
         let elsewhere = winding_pack(Path::new("/omsi/Sceneryobjects/x/model/y.o3d"));
         assert_eq!(elsewhere, winding_pack(Path::new("/omsi/Sceneryobjects/x/model/z.o3d")));
         assert_ne!(elsewhere, winding_pack(Path::new("/omsi/Sceneryobjects/w/model/y.o3d")));
+    }
+
+    fn restored_display_vehicle() -> VehicleInstance {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "omsi_restore_{}_{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("display.osc");
+        std::fs::write(
+            &script,
+            r#"
+{frame}
+(M.L.Matrix_frame)
+(M.L.line_draw)
+{end}
+{macro:line_draw}
+(L.$.line_request) (S.$.line_display)
+{end}
+{macro:Matrix_frame}
+(L.L.power) (L.L.IBIS_Linie_Complex) (L.L.Matrix_Nr_Last) = ! &&
+(L.L.power) (L.L.IBIS_TerminusIndex) (L.L.Matrix_TerminusIndex_Last) = ! && ||
+{if}
+0 (M.V.STNewTex)
+0 (M.V.STLock)
+0 255 255 120 0 (M.V.STSetColor)
+0 0 0 4 2 (M.V.STDrawRect)
+0 (M.V.STUnlock)
+(L.L.IBIS_Linie_Complex) (S.L.Matrix_Nr_Last)
+(L.L.IBIS_TerminusIndex) (S.L.Matrix_TerminusIndex_Last)
+{endif}
+{end}
+"#,
+        )
+        .unwrap();
+        let vars = dir.join("vars.txt");
+        std::fs::write(&vars, "power\nIBIS_Linie_Complex\nIBIS_TerminusIndex\nMatrix_Nr_Last\nMatrix_TerminusIndex_Last\n").unwrap();
+        let strings = dir.join("strings.txt");
+        std::fs::write(&strings, "line_request\nline_display\n").unwrap();
+        let program = omsi_script::compile(&omsi_script::CompileInput {
+            scripts: vec![script],
+            varlists: vec![vars],
+            stringvarlists: vec![strings],
+            ..Default::default()
+        });
+        assert!(program.errors.is_empty(), "{:?}", program.errors);
+        let mut program = program;
+        program.declare_str_var("destination");
+        let mut model = Model::default();
+        model.script_textures = vec![(4, 2)];
+        model.text_textures.push(omsi_model::TextTexture {
+            variable: "destination".into(),
+            width: 4,
+            height: 2,
+            ..Default::default()
+        });
+        model.text_textures.push(omsi_model::TextTexture {
+            variable: "line_display".into(),
+            width: 900,
+            height: 100,
+            ..Default::default()
+        });
+        let ty = Arc::new(VehicleType {
+            def: Default::default(),
+            model,
+            model_dir: dir.clone(),
+            program: Arc::new(program),
+            meshes: Vec::new(),
+            paint_schemes: Vec::new(),
+            texchanges: Vec::new(),
+            wheel_meshes: Vec::new(),
+            suspension_axles: Vec::new(),
+            missing_packs: Vec::new(),
+            mesh_bounds: Vec::new(),
+            mesh_boxes: Vec::new(),
+        });
+        std::fs::remove_dir_all(dir).unwrap();
+        VehicleInstance::new(ty, VehicleHost::new(Default::default()))
+    }
+
+    #[test]
+    fn restore_refreshes_unchanged_bitmap_without_retyping_or_powering_on() {
+        for power in [0.0, 1.0] {
+            let mut original = restored_display_vehicle();
+            original.set_var("power", power);
+            original.set_var("IBIS_Linie_Complex", 10900.0);
+            original.set_var("IBIS_TerminusIndex", 9.0);
+            original.update(0.02);
+            let vars: Vec<_> = original
+                .ty
+                .program
+                .var_names
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.clone(), original.state.vars[i]))
+                .collect();
+            let mut resumed =
+                VehicleInstance::new(original.ty.clone(), VehicleHost::new(Default::default()));
+            resumed.restore_script_state(
+                &vars,
+                &[("destination".into(), "  Manual destination  ".into())],
+            );
+            assert_eq!(resumed.var("power"), Some(power));
+            assert_eq!(resumed.var("IBIS_Linie_Complex"), Some(10900.0));
+            assert_eq!(resumed.var("IBIS_TerminusIndex"), Some(9.0));
+            assert_eq!(resumed.str_var("destination"), "  Manual destination  ");
+            assert!(resumed.host.script_textures[0].rgba.iter().all(|p| *p == 0));
+            resumed.update(0.02);
+            assert_eq!(
+                resumed.host.script_textures[0].rgba,
+                original.host.script_textures[0].rgba
+            );
+            assert_eq!(
+                resumed.host.script_textures[0].rgba.iter().any(|p| *p != 0),
+                power > 0.0
+            );
+        }
+    }
+
+    #[test]
+    fn string_only_restore_preserves_and_reuploads_main_and_articulated_displays() {
+        for power in [0.0, 1.0] {
+            let mut v = restored_display_vehicle();
+            v.set_var("power", power);
+            v.attach_trailer(v.ty.clone());
+            for def in &v.ty.model.text_textures {
+                v.text_textures
+                    .push(crate::texttex::TextTextureState::new(def.clone(), None));
+                v.trailers[0]
+                    .text_textures
+                    .push(crate::texttex::TextTextureState::new(def.clone(), None));
+            }
+            let strings = [
+                ("line_request".into(), "X9                            ".into()),
+                ("line_display".into(), "X9                            ".into()),
+                ("destination".into(), "  Manual destination  ".into()),
+            ];
+            // Repeat with already uploaded, unchanged text: a newly bound texture still
+            // needs its image, even when no numeric variables were saved.
+            for _ in 0..2 {
+                v.restore_script_state(&[], &strings);
+                v.update(0.02);
+                assert_eq!(v.var("power"), Some(power));
+                assert_eq!(v.str_var("destination"), "  Manual destination  ");
+                assert_eq!(v.str_var("line_request"), "X9                            ");
+                assert_eq!(v.str_var("line_display"), "X9                            ");
+                assert_eq!(v.update_text_textures(), vec![0, 1]);
+                let mut part = v.trailers.pop().unwrap();
+                assert_eq!(part.update_text_textures(&v), vec![0, 1]);
+                assert_eq!(
+                    part.text_textures[1].last_text.as_deref(),
+                    Some("X9                            ")
+                );
+                v.trailers.push(part);
+                for t in &mut v.text_textures {
+                    t.pending.take();
+                }
+                assert!(v.update_text_textures().is_empty());
+            }
+        }
     }
 
     #[test]
@@ -4069,6 +4375,210 @@ mod tests {
             (axle[0] - 0.15).abs() < 1e-5 && axle[1] == 0.0 && axle[2] == 0.0,
             "{axle:?}"
         );
+    }
+
+    /// Volvo Wright's dashboard rear-close trigger falls back to its explicit external-close
+    /// path when the handbrake guard only produced the button sound.
+    #[test]
+    fn volvo_wright_rear_close_fallback_moves_a_partly_open_door() {
+        let root = omsi_cfg::env::var_os("OMSI_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/Volvo_Wright_Family/AVBWS1.bus");
+        if !bus.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = Arc::new(VehicleType::load(&root, &bus).expect("AVBWS1"));
+        let mut v = VehicleInstance::new(ty, VehicleHost::new(crate::SimClock::default()));
+        for (name, value) in [
+            ("elec_real_main", 1.0),
+            ("elec_busbar_main", 1.0),
+            ("elec_busbar_avail", 1.0),
+            ("cockpit_button_ignition", 1.0),
+            ("bremse_feststell_sw", 0.0),
+            ("cockpit_button_smallhb", 0.0),
+            ("door_2", 0.5),
+            ("door_3", 0.5),
+            ("doorTarget_23", 1.0),
+        ] {
+            assert!(v.set_var(name, value), "missing {name}");
+        }
+        assert!(v.trigger("bus_dooraftclose"));
+        assert_eq!(v.var("doorTarget_23"), Some(0.0));
+    }
+
+    #[test]
+    fn volvo_wright_rear_toggle_falls_back_to_external_close() {
+        let root = omsi_cfg::env::var_os("OMSI_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/Volvo_Wright_Family/AVBWS1.bus");
+        if !bus.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = Arc::new(VehicleType::load(&root, &bus).expect("AVBWS1"));
+        let mut v = VehicleInstance::new(ty, VehicleHost::new(crate::SimClock::default()));
+        for (name, value) in [
+            ("elec_real_main", 1.0),
+            ("elec_busbar_main", 1.0),
+            ("elec_busbar_avail", 1.0),
+            ("cockpit_button_ignition", 1.0),
+            ("bremse_feststell_sw", 0.0),
+            ("cockpit_button_smallhb", 0.0),
+            ("door_2", 0.5),
+            ("door_3", 0.5),
+            ("doorTarget_23", 1.0),
+        ] {
+            assert!(v.set_var(name, value), "missing {name}");
+        }
+        assert!(v.trigger("bus_dooraft"));
+        assert_eq!(v.var("doorTarget_23"), Some(0.0));
+        assert_eq!(v.var("bdoor_embtn_cls"), Some(1.0));
+    }
+
+    #[test]
+    fn volvo_wright_rear_toggle_closes_open_leaves_even_with_zero_target() {
+        let root = omsi_cfg::env::var_os("OMSI_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/Volvo_Wright_Family/AVBWS1.bus");
+        if !bus.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = Arc::new(VehicleType::load(&root, &bus).expect("AVBWS1"));
+        let mut v = VehicleInstance::new(ty, VehicleHost::new(crate::SimClock::default()));
+        for (name, value) in [
+            ("elec_real_main", 1.0),
+            ("elec_busbar_main", 1.0),
+            ("elec_busbar_avail", 1.0),
+            ("cockpit_button_ignition", 1.0),
+            ("bremse_feststell_sw", 0.0),
+            ("cockpit_button_smallhb", 0.0),
+            ("door_2", 0.5),
+            ("door_3", 0.5),
+            ("doorTarget_23", 0.0),
+        ] {
+            assert!(v.set_var(name, value), "missing {name}");
+        }
+        assert!(v.trigger("bus_dooraft"));
+        assert_eq!(v.var("doorTarget_23"), Some(0.0));
+    }
+
+    #[test]
+    fn volvo_wright_rear_toggle_reopens_during_forced_close() {
+        let root = omsi_cfg::env::var_os("OMSI_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/Volvo_Wright_Family/AVBWS1.bus");
+        if !bus.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = Arc::new(VehicleType::load(&root, &bus).expect("AVBWS1"));
+        let mut v = VehicleInstance::new(ty, VehicleHost::new(crate::SimClock::default()));
+        for (name, value) in [
+            ("elec_real_main", 1.0),
+            ("elec_busbar_main", 1.0),
+            ("elec_busbar_avail", 1.0),
+            ("cockpit_button_ignition", 1.0),
+            ("bremse_feststell_sw", 1.0),
+            ("cockpit_button_smallhb", 0.0),
+            ("door_2", 0.5),
+            ("door_3", 0.5),
+            ("doorTarget_23", 0.0),
+            ("bdoor_embtn_cls", 1.0),
+        ] {
+            assert!(v.set_var(name, value), "missing {name}");
+        }
+        assert!(v.trigger("bus_dooraft"));
+        assert_eq!(v.var("doorTarget_23"), Some(1.0));
+        assert_eq!(v.var("bdoor_embtn_cls"), Some(0.0));
+    }
+
+    #[test]
+    fn volvo_wright_rear_toggle_keeps_close_target_through_frames() {
+        let root = omsi_cfg::env::var_os("OMSI_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/Volvo_Wright_Family/AVBWS1.bus");
+        if !bus.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = Arc::new(VehicleType::load(&root, &bus).expect("AVBWS1"));
+        let mut v = VehicleInstance::new(ty, VehicleHost::new(crate::SimClock::default()));
+        for (name, value) in [
+            ("elec_real_main", 1.0),
+            ("elec_busbar_main", 1.0),
+            ("elec_busbar_avail", 1.0),
+            ("cockpit_button_ignition", 1.0),
+            ("bremse_feststell_sw", 0.0),
+            ("cockpit_button_smallhb", 0.0),
+            ("bremse_p_Tank04", 800000.0),
+            ("door_2", 1.0),
+            ("door_3", 1.0),
+            ("doorTarget_23", 1.0),
+            ("bdoor_sound_played", 1.0),
+        ] {
+            assert!(v.set_var(name, value), "missing {name}");
+        }
+        assert!(v.trigger("bus_dooraft"));
+        v.update(1.0 / 30.0);
+        assert_eq!(v.var("backdoor_buzzer"), Some(1.0));
+        for _ in 1..120 {
+            v.update(1.0 / 30.0);
+        }
+        assert_eq!(v.var("doorTarget_23"), Some(0.0));
+        assert!(v.var("door_2").unwrap_or(1.0) < 0.1);
+        assert!(v.var("door_3").unwrap_or(1.0) < 0.1);
+        assert!(v.host.fired_triggers.iter().any(|name| name == "ev_doortriggerclose_2"));
+    }
+
+    #[test]
+    fn volvo_wright_family_rear_toggle_closes_every_bus_variant() {
+        let root = omsi_cfg::env::var_os("OMSI_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("../../../OMSI 2 Original"));
+        let dir = root.join("Vehicles/Volvo_Wright_Family");
+        if !dir.is_dir() {
+            eprintln!("skipped: no {}", dir.display());
+            return;
+        }
+        let mut buses: Vec<_> = std::fs::read_dir(&dir)
+            .expect("Volvo Wright directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bus")))
+            .collect();
+        buses.sort();
+        assert!(buses.len() >= 20, "unexpectedly few Volvo Wright buses: {}", buses.len());
+        for bus in buses {
+            let name = bus.file_name().unwrap().to_string_lossy().into_owned();
+            let ty = Arc::new(VehicleType::load(&root, &bus).unwrap_or_else(|e| panic!("{name}: {e}")));
+            let mut v = VehicleInstance::new(ty, VehicleHost::new(crate::SimClock::default()));
+            for (var, value) in [
+                ("elec_real_main", 1.0),
+                ("elec_busbar_main", 1.0),
+                ("elec_busbar_avail", 1.0),
+                ("cockpit_button_ignition", 1.0),
+                ("bremse_feststell_sw", 0.0),
+                ("cockpit_button_smallhb", 0.0),
+                ("door_2", 0.5),
+                ("door_3", 0.5),
+                ("doorTarget_23", 1.0),
+            ] {
+                if v.var(var).is_some() {
+                    assert!(v.set_var(var, value), "{name}: missing {var}");
+                }
+            }
+            assert!(v.trigger("bus_dooraft"), "{name}: missing bus_dooraft");
+            let target = v.var("doorTarget_23").unwrap_or(0.0);
+            let request = v.var("door_back_close_request").unwrap_or(0.0);
+            assert!(target == 0.0 || request > 0.0, "{name}: rear door stayed open (target={target}, request={request})");
+        }
     }
 
     /// The wheel of a body without a rigid body stands on the road the drawn faces put
@@ -4864,5 +5374,52 @@ mod grip_tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod winding_exporter_tests {
+    use super::{keep_authored_winding, winding_pack, WindingVotes, WINDING_EVIDENCE_CAP};
+    use std::path::Path;
+
+    #[test]
+    fn borrowed_pack_evidence_stays_separate_and_capped() {
+        let body = winding_pack(Path::new("/omsi/Vehicles/Bus/model/body.o3d"));
+        let borrowed = winding_pack(Path::new("/omsi/Vehicles/Bus/model/../../Display/model/display.o3d"));
+        let mut votes: std::collections::HashMap<String, WindingVotes> = std::collections::HashMap::new();
+        for _ in 0..4 {
+            votes.entry(body.clone()).or_default().record(true, usize::MAX);
+        }
+        for _ in 0..5 {
+            votes.entry(body.clone()).or_default().record(false, 2);
+        }
+        votes.entry(borrowed.clone()).or_default().record(false, 100);
+        assert!(votes[&body].keep_authored());
+        assert_eq!(votes[&body].forward_weight, 4 * WINDING_EVIDENCE_CAP);
+        assert!(!votes[&borrowed].keep_authored());
+        let local_display = winding_pack(Path::new("/omsi/Vehicles/Display/model/display.o3d"));
+        assert_eq!(borrowed, local_display);
+    }
+
+    #[test]
+    fn empty_or_inconclusive_votes_keep_default() {
+        assert!(!WindingVotes::default().keep_authored());
+        assert!(!keep_authored_winding(0, 5, 0, 10));
+        assert!(!keep_authored_winding(5, 5, 10, 10));
+    }
+
+    #[test]
+    fn close_mesh_count_can_use_triangle_evidence() {
+        assert!(keep_authored_winding(64, 74, 91_597, 79_544));
+    }
+
+    #[test]
+    fn clear_backward_majority_is_not_overridden() {
+        assert!(!keep_authored_winding(40, 80, 120_000, 60_000));
+    }
+
+    #[test]
+    fn forward_majority_keeps_existing_behaviour() {
+        assert!(keep_authored_winding(80, 40, 1, 1));
     }
 }

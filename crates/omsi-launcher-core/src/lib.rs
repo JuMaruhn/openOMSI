@@ -1765,6 +1765,16 @@ fn mirror_refresh(x: &str) -> &'static str {
 /// The page's view of a `settings.cfg` text (None: no file yet, the game's defaults).
 pub fn settings_from_text(text: Option<&str>) -> Value {
     let mut v = json!({ "msaa": 4, "anisotropy": 8, "ssao": true, "shadows": true, "shadow_size": 2048, "navigator": true, "ui_opacity": 0.85, "navigator_corner": "bottom-left", "boarding": "auto", "detail_textures": true, "exact_fare": true, "enhanced": false, "graphics": "vanilla_plus", "fullscreen": false, "vsync": true, "volume": 0.6, "drive_keys": "simple", "render_scale": "auto", "view_distance": "auto", "language": "ENG", "texture_memory": 0, "texture_compression": true, "chat": true, "tooltips": true, "name_tags": true, "show_fps": false, "clouds": true, "pax_density": 1.0, "vol_ai": 1.0, "vol_scenery": 1.0, "mirror_size": 256, "doppler": true, "driver": true, "max_fps": 0, "min_obj_size": 0.013, "max_obj_dist": "auto" });
+    v["triple_screen"] = json!(false);
+    v["triple_span"] = json!(true);
+    v["triple_hud_center"] = json!(true);
+    v["triple_fov_deg"] = json!(0.0);
+    v["triple_width_mm"] = json!(600);
+    v["triple_distance_mm"] = json!(650);
+    v["triple_bezel_mm"] = json!(0);
+    v["triple_left_angle_deg"] = json!(45);
+    v["triple_right_angle_deg"] = json!(45);
+    v["triple_eye_height_mm"] = json!(0);
     v["vr"] = json!(false);
     v["vr_scale"] = json!(0.65);
     v["vr_head_smoothing_ms"] = json!(0);
@@ -1773,6 +1783,8 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
     v["vr_desktop_mirror"] = json!(true);
     v["discord_status"] = json!(true);
     v["discord_app_id"] = json!("");
+    // positional voice through GreenTeaSpeak's openOMSI plugin in multiplayer
+    v["voice_chat"] = json!(true);
     // the launcher gives the graphics card up while a game runs (off: it stays drawn)
     v["launcher_rest"] = json!(true);
     // the window's size in pixels, "auto" to fit the screen (#904)
@@ -1809,6 +1821,13 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
             "msaa" | "shadow_size" => v[&k] = json!(val.parse::<i64>().unwrap_or(0)),
             "ui_opacity" | "volume" | "vol_ai" | "vol_scenery" | "min_obj_size" => v[&k] = json!(val.parse::<f64>().unwrap_or(0.0)),
             "pax_density" => v[&k] = json!(val.trim_end_matches('%').parse::<f64>().map(|x| if x > 5.0 { x / 100.0 } else { x }).unwrap_or(1.0)),
+            "triple_fov_deg" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| if x < 20.0 { 0.0 } else { x.min(120.0) }).unwrap_or(0.0)),
+            "triple_width_mm" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(200.0, 2000.0)).unwrap_or(600.0)),
+            "triple_distance_mm" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(200.0, 3000.0)).unwrap_or(650.0)),
+            "triple_bezel_mm" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 100.0)).unwrap_or(0.0)),
+            "triple_left_angle_deg" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 90.0)).unwrap_or(45.0)),
+            "triple_right_angle_deg" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 90.0)).unwrap_or(45.0)),
+            "triple_eye_height_mm" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(-500.0, 500.0)).unwrap_or(0.0)),
             "vr_scale" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.5, 1.0)).unwrap_or(0.65)),
             "vr_head_smoothing_ms" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 30.0) as i64).unwrap_or(0)),
             "vr_mirror_rate" => v[&k] = json!(val.parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(-1.0, 360.0) as i64).unwrap_or(16)),
@@ -1816,7 +1835,7 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
             "mirror_refresh" => v[&k] = json!(mirror_refresh(val)),
             "max_fps" => v[&k] = json!(val.parse::<f64>().map(|x| x as i64).unwrap_or(0)),
             "max_obj_dist" => v[&k] = if val.eq_ignore_ascii_case("auto") { json!("auto") } else { json!(val.parse::<f64>().map(|m| (m.round() as i64).to_string()).unwrap_or_else(|_| "auto".into())) },
-            "ssao" | "shadows" | "shadow_blobs" | "navigator" | "enhanced" | "vr" | "vr_desktop_mirror" | "fullscreen" | "vsync" | "exact_fare" | "detail_textures" | "texture_compression" | "chat" | "tooltips" | "name_tags" | "show_fps" | "clouds" | "doppler" | "driver" | "use_real_time" | "use_real_date" | "use_real_year" | "collision_vehicles" | "collision_objects" | "collision_pedestrians" | "head_movement" | "driverview_smooth" | "hands_in_cab" | "alt_view" => v[&k] = json!(b(val)),
+            "ssao" | "shadows" | "shadow_blobs" | "navigator" | "enhanced" | "triple_screen" | "triple_span" | "triple_hud_center" | "vr" | "vr_desktop_mirror" | "fullscreen" | "vsync" | "exact_fare" | "detail_textures" | "texture_compression" | "chat" | "tooltips" | "name_tags" | "show_fps" | "clouds" | "doppler" | "driver" | "use_real_time" | "use_real_date" | "use_real_year" | "collision_vehicles" | "collision_objects" | "collision_pedestrians" | "head_movement" | "driverview_smooth" | "hands_in_cab" | "alt_view" => v[&k] = json!(b(val)),
             "maintenance" | "ai_unsched_factor" | "ai_max_scheduled" => v[&k] = json!(val.trim_end_matches('%').parse::<f64>().map(|x| x.max(0.0) as i64).unwrap_or(0)),
             // (-1: no parked cars at all, #864)
             "ai_max_parked" => v[&k] = json!(val.parse::<f64>().map(|x| x.max(-1.0) as i64).unwrap_or(0)),
@@ -1834,7 +1853,7 @@ pub fn settings_from_text(text: Option<&str>) -> Value {
             "wheel_range" => v[&k] = json!(val.parse::<f64>().unwrap_or(900.0).clamp(90.0, 2880.0)),
             "wheel_lock" => v[&k] = json!(val.parse::<f64>().map(|x| if x < 45.0 { 0.0 } else { x.min(2880.0) }).unwrap_or(0.0)),
             "fov" => v[&k] = json!(val.parse::<f64>().map(|x| if x < 20.0 { 0.0 } else { x.min(120.0) }).unwrap_or(0.0)),
-            "camera_collision" | "steer_look" | "head_tracking" | "discord_status" | "launcher_rest" => v[&k] = json!(b(val)),
+            "camera_collision" | "steer_look" | "head_tracking" | "discord_status" | "voice_chat" | "launcher_rest" => v[&k] = json!(b(val)),
             // (how much of the mip chain an LED panel is held at, 0..4; a file from before
             // it was a number says 1 or 0)
             "led_mips" => v[&k] = json!(val.trim().parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 4.0)).unwrap_or(1.3)),
@@ -2158,13 +2177,18 @@ pub fn settings_to_text(v: &Value, old: Option<&str>) -> String {
     let vr_scale = v.get("vr_scale").and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))).filter(|x| x.is_finite()).unwrap_or(0.65).clamp(0.5, 1.0);
     let vr_head_smoothing_ms = v.get("vr_head_smoothing_ms").and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))).filter(|x| x.is_finite()).unwrap_or(0.0).clamp(0.0, 30.0);
     let vr_mirror_rate = v.get("vr_mirror_rate").and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.parse().ok()))).filter(|x| x.is_finite()).unwrap_or(16.0).clamp(-1.0, 360.0);
-    let text = format!("{text}vr={}\nvr_scale={vr_scale}\nvr_head_smoothing_ms={vr_head_smoothing_ms}\nvr_mirror_rate={vr_mirror_rate}\nvr_desktop_mirror={}\ndiscord_status={}\nlauncher_rest={}\n", b("vr", false), b("vr_desktop_mirror", true), b("discord_status", true), b("launcher_rest", true));
+    let text = format!("{text}vr={}\nvr_scale={vr_scale}\nvr_head_smoothing_ms={vr_head_smoothing_ms}\nvr_mirror_rate={vr_mirror_rate}\nvr_desktop_mirror={}\ndiscord_status={}\nvoice_chat={}\nlauncher_rest={}\n", b("vr", false), b("vr_desktop_mirror", true), b("discord_status", true), b("voice_chat", true), b("launcher_rest", true));
     // what the page does not manage (keys of newer games, hand-written ones) stays as it
     // was in the file; other spellings of the keys just written go
     let mut text = text;
     text.push_str(&format!("resolution={}\n", resolution_text(v.get("resolution").and_then(|x| x.as_str()).unwrap_or("auto"))));
     text.push_str(&format!("mirror_refresh={}\n", mirror_refresh(v.get("mirror_refresh").and_then(|x| x.as_str()).unwrap_or("full"))));
     text.push_str(&format!("look_sens={}\nsteer_look_angle={}\nsteer_look_response={}\ntime_sync={}\nmetar_sync={}\nmetar_station={}\n", f("look_sens", 1.0).clamp(0.1, 2.0), f("steer_look_angle", 30.0).clamp(0.0, 60.0), f("steer_look_response", 0.25).clamp(0.05, 1.0), b("time_sync", false), b("metar_sync", false), v.get("metar_station").and_then(|x| x.as_str()).unwrap_or("").chars().filter(|c| c.is_ascii_alphabetic()).take(4).collect::<String>().to_ascii_uppercase()));
+    let triple_fov = f("triple_fov_deg", 0.0);
+    text.push_str(&format!("triple_hud_center={}\ntriple_fov_deg={}\n", b("triple_hud_center", true), if triple_fov < 20.0 { 0.0 } else { triple_fov.min(120.0) }));
+    text.push_str(&format!("triple_screen={}\ntriple_span={}\n", b("triple_screen", false), b("triple_span", true)));
+    text.push_str(&format!("triple_width_mm={}\ntriple_distance_mm={}\ntriple_bezel_mm={}\n", f("triple_width_mm", 600.0).clamp(200.0, 2000.0), f("triple_distance_mm", 650.0).clamp(200.0, 3000.0), f("triple_bezel_mm", 0.0).clamp(0.0, 100.0)));
+    text.push_str(&format!("triple_left_angle_deg={}\ntriple_right_angle_deg={}\ntriple_eye_height_mm={}\n", f("triple_left_angle_deg", 45.0).clamp(0.0, 90.0), f("triple_right_angle_deg", 45.0).clamp(0.0, 90.0), f("triple_eye_height_mm", 0.0).clamp(-500.0, 500.0)));
     let written: Vec<String> = text.lines().filter_map(|l| l.split_once('=')).map(|(k, _)| k.trim().to_ascii_lowercase()).collect();
     for line in old.unwrap_or("").lines() {
         let t = line.trim();
@@ -2688,7 +2712,7 @@ mod tests {
     fn the_games_options_survive_a_save() {
         // what the pause menu's Options change, read back as they were set
         let mut v = settings_from_text(None);
-        for (k, x) in [("steer_look", json!(true)), ("discord_status", json!(false)), ("launcher_rest", json!(false)), ("camera_collision", json!(false)), ("brake_hold", json!(false)), ("auto_clutch", json!(false)), ("momentary_gears", json!(true)), ("ff_enabled", json!(false)), ("head_tracking", json!(true)), ("collision_objects", json!(false)), ("led_mips", json!(2.5)), ("led_glow", json!(11)), ("look_sens", json!(0.5)), ("blinker_cancel", json!(false)), ("pedal_brake", json!(1.5)), ("seat_y", json!(-0.1))] {
+        for (k, x) in [("steer_look", json!(true)), ("discord_status", json!(false)), ("voice_chat", json!(false)), ("launcher_rest", json!(false)), ("camera_collision", json!(false)), ("brake_hold", json!(false)), ("auto_clutch", json!(false)), ("momentary_gears", json!(true)), ("ff_enabled", json!(false)), ("head_tracking", json!(true)), ("collision_objects", json!(false)), ("led_mips", json!(2.5)), ("led_glow", json!(11)), ("look_sens", json!(0.5)), ("blinker_cancel", json!(false)), ("pedal_brake", json!(1.5)), ("seat_y", json!(-0.1))] {
             v[k] = x;
         }
         let back = settings_from_text(Some(&settings_to_text(&v, None)));
@@ -2698,11 +2722,12 @@ mod tests {
         assert_eq!(settings_from_text(Some(&settings_to_text(&r, None)))["resolution"], json!("1280x800"));
         assert_eq!(resolution_text("1920 x 1080"), "1920x1080");
         assert_eq!(resolution_text("huge"), "auto");
-        for k in ["steer_look", "discord_status", "launcher_rest", "camera_collision", "brake_hold", "auto_clutch", "momentary_gears", "ff_enabled", "head_tracking", "collision_objects", "led_mips", "led_glow", "look_sens", "blinker_cancel", "pedal_brake", "seat_y"] {
+        for k in ["steer_look", "discord_status", "voice_chat", "launcher_rest", "camera_collision", "brake_hold", "auto_clutch", "momentary_gears", "ff_enabled", "head_tracking", "collision_objects", "led_mips", "led_glow", "look_sens", "blinker_cancel", "pedal_brake", "seat_y"] {
             assert_eq!(back[k], v[k], "{k}");
         }
         assert!(settings_from_text(None)["discord_status"].as_bool().unwrap());
         assert!(settings_from_text(None)["launcher_rest"].as_bool().unwrap());
+        assert!(settings_from_text(None)["voice_chat"].as_bool().unwrap());
         let prior = settings_from_text(Some("discord_status=1\ndiscord_status=0\n"));
         assert!(!prior["discord_status"].as_bool().unwrap());
         let mut enabled = prior;
@@ -2821,6 +2846,39 @@ mod tests {
         for key in ["vr", "vr_scale", "vr_head_smoothing_ms", "vr_mirror_rate", "vr_desktop_mirror"] {
             assert_eq!(loaded[key], settings[key], "{key} was not saved");
         }
+    }
+
+    #[test]
+    fn triple_screen_settings_survive_launcher_save() {
+        let input = "triple_screen=1\ntriple_span=0\ntriple_width_mm=620\ntriple_distance_mm=700\ntriple_bezel_mm=18\ntriple_left_angle_deg=50\ntriple_right_angle_deg=40\ntriple_eye_height_mm=60\n";
+        let values = settings_from_text(Some(input));
+        let loaded = settings_from_text(Some(&settings_to_text(&values, Some(input))));
+        for key in [
+            "triple_screen",
+            "triple_span",
+            "triple_width_mm",
+            "triple_distance_mm",
+            "triple_bezel_mm",
+            "triple_left_angle_deg",
+            "triple_right_angle_deg",
+            "triple_eye_height_mm",
+        ] {
+            assert_eq!(loaded[key], values[key], "{key}");
+        }
+        let invalid = settings_from_text(Some(
+            "triple_width_mm=NaN\ntriple_distance_mm=inf\ntriple_bezel_mm=-20\n",
+        ));
+        assert_eq!(invalid["triple_width_mm"], 600.0);
+        assert_eq!(invalid["triple_distance_mm"], 650.0);
+        assert_eq!(invalid["triple_bezel_mm"], 0.0);
+        assert_eq!(values["triple_hud_center"], true);
+        let values = settings_from_text(Some(
+            "triple_screen=1\ntriple_hud_center=0\ntriple_fov_deg=75\nfov=50\n",
+        ));
+        let loaded = settings_from_text(Some(&settings_to_text(&values, None)));
+        assert_eq!(loaded["triple_hud_center"], false);
+        assert_eq!(loaded["triple_fov_deg"], 75.0);
+        assert_eq!(loaded["fov"], 50.0);
     }
 
     #[test]
