@@ -20,6 +20,24 @@ use glam::DVec3;
 use omsi_render::{Camera, Lighting, Renderer, Scene};
 use std::sync::mpsc::{channel, Receiver};
 
+/// Where the camera stands. The Vehicle Editor switches between them with the keys the game
+/// uses for its own views (F1, F2, F3; see `launcher::vehicle_editor`); the card beside the
+/// bus list is always [`EditorCam::Outside`].
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum EditorCam {
+    /// Turning about the bus: the picture this page has always shown.
+    #[default]
+    Outside,
+    /// At one of the bus's own `[add_camera_driver]` eyes.
+    Driver(usize),
+    /// At one of its `[add_camera_pax]` eyes.
+    Pax(usize),
+}
+
+/// Where the outside view stands before anyone turns it.
+const START_YAW: f32 = 215.0;
+const START_PITCH: f32 = 8.0;
+
 /// What the showroom shows.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Look {
@@ -92,6 +110,10 @@ pub struct Showroom {
     pub busy: bool,
     /// How wet the unwiped panes settled on this weather (see [`Showroom::wetness`]).
     wetness: f32,
+    /// Where the camera stands, and how far the head is turned from where that eye looks
+    /// (degrees). Both are the Vehicle Editor's: `render` only reads them with `effects`.
+    pub view: EditorCam,
+    pub look: (f32, f32),
     /// The picture: its texture and size, and whether it must be drawn again.
     target: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
     dirty: bool,
@@ -129,11 +151,11 @@ impl Showroom {
             failed: None,
             loading: None,
             error: None,
-            yaw: 215.0,
-            pitch: 8.0,
+            yaw: START_YAW,
+            pitch: START_PITCH,
             zoom: 1.0,
-            yaw_to: 215.0,
-            pitch_to: 8.0,
+            yaw_to: START_YAW,
+            pitch_to: START_PITCH,
             zoom_to: 1.0,
             auto_turn: false,
             idle: 0.0,
@@ -141,6 +163,8 @@ impl Showroom {
             focus_now: 0.5,
             busy: false,
             wetness: 0.0,
+            view: EditorCam::default(),
+            look: (0.0, 0.0),
             target: None,
             dirty: true,
             generation: 0,
@@ -160,6 +184,26 @@ impl Showroom {
         self.pitch_to = (self.pitch_to + dy * 0.25).clamp(-4.0, 55.0);
         self.idle = 0.0;
     }
+    /// Turn the outside view by so many degrees. `orbit` takes the mouse's pixels and puts
+    /// its own gain on them; the arrow keys already know how far they mean to turn.
+    pub fn turn(&mut self, dx: f32, dy: f32) {
+        self.yaw_to += dx;
+        self.pitch_to = (self.pitch_to + dy).clamp(-4.0, 55.0);
+        self.idle = 0.0;
+    }
+
+    /// Everything looking where it looked at the start (`view_reset_all_directions`).
+    pub fn reset_turn(&mut self) {
+        (self.yaw_to, self.pitch_to, self.zoom_to) = (START_YAW, START_PITCH, 1.0);
+        self.look = (0.0, 0.0);
+        self.idle = 0.0;
+    }
+
+    /// Draw the picture again: the camera moved, which no `Look` says.
+    pub fn redraw(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn zoom_by(&mut self, k: f32) {
         self.zoom_to = (self.zoom_to * k).clamp(0.55, 2.2);
         self.idle = 0.0;
@@ -363,6 +407,7 @@ impl Showroom {
 
     fn render(&mut self, renderer: &mut Renderer, target: &wgpu::TextureView, w: u32, h: u32) {
         let (yaw, pitch, zoom, focus) = (self.yaw, self.pitch, self.zoom, self.focus_now);
+        let (view, look) = (self.view, self.look);
         let Some(s) = self.shown.as_mut() else { return };
         let fov = 30.0f32;
         let aspect = w as f32 / h.max(1) as f32;
@@ -384,7 +429,17 @@ impl Showroom {
         // side by as much
         let side = (focus - 0.5) * 2.0 * half_v * aspect;
         let look_yaw = yaw - side.atan().to_degrees();
-        let cam = Camera { position: pos, yaw: look_yaw, pitch: -pitch, roll: 0.0, fov_deg: fov, near: 0.2, far: 6000.0 };
+        let mut cam = Camera { position: pos, yaw: look_yaw, pitch: -pitch, roll: 0.0, fov_deg: fov, near: 0.2, far: 6000.0 };
+        // Inside the bus (the Vehicle Editor's F1 and F2): its own eye, turned by the look.
+        // Only there - the card beside the bus list keeps the turning view it has always
+        // had, whatever this is left at.
+        if s.look.effects {
+            if let (Some(c), Some(v)) = (interior_camera(s, view), s.vehicle.as_ref()) {
+                let (eye, cyaw, cpitch) = v.camera_world(&c);
+                let fov = if c.fov > 1.0 { c.fov } else { 50.0 };
+                cam = Camera { position: eye, yaw: cyaw + look.0, pitch: cpitch + look.1, roll: 0.0, fov_deg: fov, near: 0.05, far: 6000.0 };
+            }
+        }
         s.scene.overlays.clear();
         let _ = &s.weather;
         // A picture on its own. The enhanced path's exposure and sky follow the light over a
@@ -524,6 +579,31 @@ fn weather_to_scripts(vehicle: &mut omsi_sim::VehicleInstance, weather: &omsi_co
     }
     vehicle.update(0.0);
     last
+}
+
+/// The bus's own camera a view names, taken as the game takes it: from `[camera_std]`
+/// onwards, wrapping (`camera_util::driver_eye`). None outside, or where the bus gives none.
+fn interior_camera(s: &Shown, view: EditorCam) -> Option<omsi_vehicle::Camera> {
+    let def = &s.vehicle.as_ref()?.ty.def;
+    let (list, i) = match view {
+        EditorCam::Outside => return None,
+        EditorCam::Driver(i) => (&def.cameras_driver, i),
+        EditorCam::Pax(i) => (&def.cameras_pax, i),
+    };
+    (!list.is_empty()).then(|| list[(def.camera_std + i) % list.len()].clone())
+}
+
+/// How many eyes a view has to step through (`view_interiorcam_plus/minus`).
+impl Showroom {
+    pub fn interior_count(&self, view: EditorCam) -> usize {
+        let Some(s) = self.shown.as_ref() else { return 0 };
+        let Some(def) = s.vehicle.as_ref().map(|v| &v.ty.def) else { return 0 };
+        match view {
+            EditorCam::Outside => 0,
+            EditorCam::Driver(_) => def.cameras_driver.len(),
+            EditorCam::Pax(_) => def.cameras_pax.len(),
+        }
+    }
 }
 
 /// A round showroom floor under the bus: dark, matt, catching its shadow.

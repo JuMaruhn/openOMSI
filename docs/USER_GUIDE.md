@@ -208,7 +208,12 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   dry; under it stands what that comes to on screen, because the layer is drawn at
   `min(1, wetness x 1.8)` and is already fully opaque at a wetness of 0.56. (The launcher's
   own window still sets ambient occlusion off and keeps a small shadow map, for this page and
-  the Drive page alike.)
+  the Drive page alike.) The camera takes the keys the game gives its own views: **F1** the
+  driver's seat, **F2** a passenger's, **F3** the turning view of the whole bus;
+  **Numpad 4 / 6** step through the eyes a bus offers of the kind in use
+  (`view_interiorcam_minus` / `_plus`), **Numpad 8** puts every direction back
+  (`view_reset_all_directions`), and the **arrow keys** turn the view - round the bus outside,
+  the head inside. The mouse still drags and the wheel still zooms the outside view.
 * **Setup** - where the original installation and the game binary are. The OMSI 2 folder may
   be given as a path with quotes, as `Omsi.exe` itself or as a folder inside it; unpacked into
   the OMSI 2 folder itself, openOMSI keeps its own content in an `openOMSI` folder there and
@@ -222,7 +227,9 @@ Without a person at it: `OMSI_LAUNCHER_PAGE=drive:2` opens a page (and a Drive s
 `settings:3` or `controls:1` a tab), `OMSI_LAUNCHER_SHOT=secs:file.png` writes a picture,
 `OMSI_LAUNCHER_EXIT=secs` closes it,
 `OMSI_LAUNCHER_INPUT="t=2 click 412,60; t=3 type 76; t=4 key Enter; t=5 shot a.png"` works
-it (logical pixels). The data side is `crates/omsi-launcher-core`:
+it (logical pixels). `key` also presses a key of the window's own - `F1`..`F4`, `Num0`..`Num9`,
+`Left`, `Right`, `Up`, `Down` - and `hold Left` / `release Left` keep one down over several
+frames, which is how the Vehicle Editor's arrow keys are driven. The data side is `crates/omsi-launcher-core`:
 `openomsi-launcher --cli lines '{"map":"maps/Grundorf/global.cfg"}'` runs any of its commands
 from a terminal - `config`, `maps`, `vehicles`, `weather`, `lines`, `ibis`, `profiles`,
 `profile`, `mods`, `modinfo`, `install`, `instances`, `stop`, `log`, `join`, `settings`,

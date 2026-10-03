@@ -16,6 +16,8 @@ use super::state::hhmm;
 use super::Launcher;
 use omsi_launcher_lib as core;
 use omsi_ui::Rect;
+use super::showroom::EditorCam;
+use winit::keyboard::KeyCode;
 
 /// The panel of buttons over the picture, down its right.
 const PANEL_W: f32 = 248.0;
@@ -46,6 +48,79 @@ impl Default for EditorView {
     }
 }
 
+/// How fast a held arrow key turns the view (degrees a second). Inside the bus the head
+/// turns slower than the picture swings round it outside.
+const TURN_OUTSIDE: f32 = 90.0;
+const TURN_INSIDE: f32 = 70.0;
+
+/// A key pressed while this page has the keyboard. Returns whether it was one of ours.
+///
+/// The bindings are the game's own, as `Inputs/keyboard.cfg` has them: F1, F2 and F3 are
+/// `view_set_driver`, `view_set_passenger` and `view_set_outside` (scan codes 59, 60, 61),
+/// Numpad 4 and 6 are `view_interiorcam_minus` and `view_interiorcam_plus` - they step
+/// through the eyes a bus gives - and Numpad 8 is `view_reset_all_directions`. The number
+/// row is left alone: there it is doors, IBIS and the cash desk, nothing to do with a view.
+pub fn view_key(l: &mut super::Launcher, code: KeyCode) -> bool {
+    let step = |l: &mut super::Launcher, by: i32| {
+        l.showroom.view = stepped(l.showroom.view, by, l.showroom.interior_count(l.showroom.view));
+        l.showroom.look = (0.0, 0.0);
+        l.showroom.redraw();
+    };
+    match code {
+        KeyCode::F1 => l.showroom.view = EditorCam::Driver(0),
+        KeyCode::F2 => l.showroom.view = EditorCam::Pax(0),
+        KeyCode::F3 => l.showroom.view = EditorCam::Outside,
+        KeyCode::Numpad4 => return { step(l, -1); true },
+        KeyCode::Numpad6 => return { step(l, 1); true },
+        KeyCode::Numpad8 => {
+            l.showroom.look = (0.0, 0.0);
+            l.showroom.reset_turn();
+            l.showroom.redraw();
+            return true;
+        }
+        _ => return false,
+    }
+    // a view just taken looks where its own eye looks
+    l.showroom.look = (0.0, 0.0);
+    l.showroom.redraw();
+    true
+}
+
+/// The next of `n` eyes, `by` along and wrapping, as `view_interiorcam_plus/minus` step.
+/// Outside, or where the bus gives no eye of that kind, nothing moves.
+fn stepped(view: EditorCam, by: i32, n: usize) -> EditorCam {
+    if n == 0 {
+        return view;
+    }
+    let next = |i: usize| ((i as i32 + by).rem_euclid(n as i32)) as usize;
+    match view {
+        EditorCam::Driver(i) => EditorCam::Driver(next(i)),
+        EditorCam::Pax(i) => EditorCam::Pax(next(i)),
+        v => v,
+    }
+}
+
+/// The arrow keys held this frame turn the view: about the bus outside, the head inside.
+/// They are the keys the game flies its free camera with (`flies_free_camera`).
+fn arrows(l: &mut super::Launcher, dt: f32) {
+    let down = |c: KeyCode| l.held.contains(&c);
+    let x = down(KeyCode::ArrowRight) as i32 - down(KeyCode::ArrowLeft) as i32;
+    let y = down(KeyCode::ArrowDown) as i32 - down(KeyCode::ArrowUp) as i32;
+    if (x, y) == (0, 0) {
+        return;
+    }
+    match l.showroom.view {
+        EditorCam::Outside => l.showroom.turn(x as f32 * TURN_OUTSIDE * dt, y as f32 * TURN_OUTSIDE * dt),
+        _ => {
+            let k = TURN_INSIDE * dt;
+            l.showroom.look.0 += x as f32 * k;
+            // (as far as a head turns in the cab, `cab_look_yaw`'s range for the pitch)
+            l.showroom.look.1 = (l.showroom.look.1 - y as f32 * k).clamp(-85.0, 85.0);
+            l.showroom.redraw();
+        }
+    }
+}
+
 /// The page: the showroom over the whole of `r`, the buttons over its right.
 ///
 /// A phone lays its pages out taller than its screen and scrolls them (`mobile::PAGE_H`), so
@@ -64,6 +139,7 @@ pub fn draw(l: &mut Launcher, r: Rect) {
     );
     // the bus has the page to itself: the panel is a card in a corner, not a column beside
     // it, so the showroom frames it in the middle (`focus` 0.5) rather than to one side
+    arrows(l, l.ui.dt);
     l.preview_full(page, 0.5);
     buttons(l, panel);
     l.showroom_pointer(page);
@@ -212,6 +288,17 @@ mod tests {
         let [_, a, _] = light_times("1989-06-21", &quito);
         let [_, b, _] = light_times("1989-12-21", &quito);
         assert!((a - b).abs() < 60, "dusk hardly moves over the year there: {a} and {b}");
+    }
+
+    /// Stepping through a bus's eyes wraps both ways and stands still where there is none.
+    #[test]
+    fn the_interior_cameras_step_round() {
+        assert_eq!(stepped(EditorCam::Driver(0), 1, 3), EditorCam::Driver(1));
+        assert_eq!(stepped(EditorCam::Driver(2), 1, 3), EditorCam::Driver(0), "forwards past the last");
+        assert_eq!(stepped(EditorCam::Driver(0), -1, 3), EditorCam::Driver(2), "back past the first");
+        assert_eq!(stepped(EditorCam::Pax(1), -1, 2), EditorCam::Pax(0));
+        assert_eq!(stepped(EditorCam::Pax(0), 1, 0), EditorCam::Pax(0), "a bus with no such eye");
+        assert_eq!(stepped(EditorCam::Outside, 1, 3), EditorCam::Outside, "outside has none to step");
     }
 
     /// The names the time button offers are keys of the translation tables, so the page is

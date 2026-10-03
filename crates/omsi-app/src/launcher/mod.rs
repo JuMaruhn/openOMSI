@@ -112,6 +112,9 @@ pub struct Launcher {
     pub phone: phone::PhoneView,
     pub pages: pages::PagesView,
     pub editor: vehicle_editor::EditorView,
+    /// Keys held down, for what is steered by holding one rather than by pressing it (the
+    /// Vehicle Editor's arrow keys). The rest of the launcher reads `ui.input.keys`.
+    held: std::collections::HashSet<KeyCode>,
     pub mp: multiplayer::MultiplayerView,
     /// Server icons in the interface pipeline (by server address), and those decoded but
     /// not yet uploaded.
@@ -192,6 +195,7 @@ impl Launcher {
         phone: phone::PhoneView::default(),
         pages: pages::PagesView::default(),
         editor: vehicle_editor::EditorView::default(),
+        held: Default::default(),
         mp: multiplayer::MultiplayerView::default(),
         icons: Default::default(),
         icons_pending: Vec::new(),
@@ -444,6 +448,7 @@ impl ApplicationHandler for Launcher {
                     sf.resize(r, s.width, s.height);
                 }
             }
+            WindowEvent::Focused(false) => self.held.clear(),
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
                 self.ui.input.shift = self.modifiers.shift_key();
@@ -498,8 +503,25 @@ impl ApplicationHandler for Launcher {
                 self.ui.input.wheel += d;
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    // (held keys are kept whichever way the event goes, so a key let go
+                    // while the window had no focus does not stay down for ever)
+                    if event.state == ElementState::Pressed {
+                        self.held.insert(code);
+                    } else {
+                        self.held.remove(&code);
+                    }
+                }
                 if event.state != ElementState::Pressed {
                     return;
+                }
+                // the Vehicle Editor's camera: the keys the game gives its own views
+                if self.page == Page::VehicleEditor && self.ui.focus.is_none() {
+                    if let PhysicalKey::Code(code) = event.physical_key {
+                        if vehicle_editor::view_key(self, code) {
+                            return;
+                        }
+                    }
                 }
                 let cmd = self.modifiers.control_key() || self.modifiers.super_key();
                 // a phone's back key: out of the storage browser, else like Escape
@@ -971,10 +993,31 @@ impl Launcher {
                         "Backspace" => Some(Key::Backspace),
                         _ => None,
                     };
-                    if let Some(k) = k {
-                        self.ui.input.keys.push(k);
+                    match (k, script_key(arg.trim())) {
+                        (Some(k), _) => self.ui.input.keys.push(k),
+                        // a key of the window's own, pressed and let go: what a page reads
+                        // straight from the keyboard (the Vehicle Editor's views)
+                        (None, Some(code)) => {
+                            self.held.insert(code);
+                            if self.page == Page::VehicleEditor {
+                                vehicle_editor::view_key(self, code);
+                            }
+                            self.held.remove(&code);
+                        }
+                        _ => log::warn!("launcher input: what key is '{arg}'?"),
                     }
                 }
+                // `hold Left` / `release Left`: a key held down over several frames, which
+                // is how the Vehicle Editor's arrow keys turn the view
+                "hold" | "release" => match script_key(arg.trim()) {
+                    Some(code) if verb == "hold" => {
+                        self.held.insert(code);
+                    }
+                    Some(code) => {
+                        self.held.remove(&code);
+                    }
+                    None => log::warn!("launcher input: what key is '{arg}'?"),
+                },
                 "shot" => self.shot = Some((0.0, std::path::PathBuf::from(arg.trim()))),
                 // `focus 0` / `focus 1`: the window loses or gets the keyboard
                 "focus" => self.set_focus(arg.trim() != "0"),
@@ -1329,6 +1372,31 @@ impl Launcher {
 
 /// The showroom's renderer: a bus on a floor needs none of the game's costly passes - no
 /// ambient occlusion, a small shadow map, 4x MSAA for the edges whatever the game uses.
+/// The keys an `OMSI_LAUNCHER_INPUT` script can press, by the names it writes them under.
+fn script_key(name: &str) -> Option<KeyCode> {
+    Some(match name.trim().to_ascii_lowercase().as_str() {
+        "f1" => KeyCode::F1,
+        "f2" => KeyCode::F2,
+        "f3" => KeyCode::F3,
+        "f4" => KeyCode::F4,
+        "num0" => KeyCode::Numpad0,
+        "num1" => KeyCode::Numpad1,
+        "num2" => KeyCode::Numpad2,
+        "num3" => KeyCode::Numpad3,
+        "num4" => KeyCode::Numpad4,
+        "num5" => KeyCode::Numpad5,
+        "num6" => KeyCode::Numpad6,
+        "num7" => KeyCode::Numpad7,
+        "num8" => KeyCode::Numpad8,
+        "num9" => KeyCode::Numpad9,
+        "left" => KeyCode::ArrowLeft,
+        "right" => KeyCode::ArrowRight,
+        "up" => KeyCode::ArrowUp,
+        "down" => KeyCode::ArrowDown,
+        _ => return None,
+    })
+}
+
 fn showroom_options(settings: &crate::settings::Settings) -> omsi_render::RenderOptions {
     omsi_render::RenderOptions { msaa: 4, ssao: false, shadow_size: 1024, render_scale: 1.0, ..settings.render_options() }
 }
