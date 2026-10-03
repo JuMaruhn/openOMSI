@@ -4,6 +4,12 @@
 //! in a card. It is drawn again only when something changed (another bus, paint, light,
 //! the preview turned by the mouse), never every frame.
 //!
+//! `Look::effects` picks between two pictures of the same bus: the card beside the bus list
+//! takes the plain one, on one fixed path with no fog, wet or snow; the Vehicle Editor takes
+//! the game's, in the renderer the settings ask for. The launcher's window is opened with
+//! `showroom_options` either way, so its ambient occlusion stays off and its shadow map
+//! small - those belong to the window, not to the light.
+//!
 //! A bus is read on a worker (its type, its scripts run to their resting state, its
 //! textures and meshes put on the GPU ahead) and then placed into a scene of its own with
 //! a fresh `World` (whose caches belong to one scene); the old scene goes when the new one
@@ -370,7 +376,21 @@ impl Showroom {
         let cam = Camera { position: pos, yaw: look_yaw, pitch: -pitch, roll: 0.0, fov_deg: fov, near: 0.2, far: 6000.0 };
         s.scene.overlays.clear();
         let _ = &s.weather;
+        // A picture on its own. The enhanced path's exposure and sky follow the light over a
+        // second or two of frames, and the showroom draws one frame per change - those
+        // frames never come, so the bus stood in a grey, flat picture at whatever exposure
+        // the renderer started with. `instant_exposure` puts both where the light wants them
+        // at once, as `Renderer::render_to_image` does for an offscreen shot. Only for the
+        // page that draws enhanced at all: the card beside the bus list keeps its frame, and
+        // the fuller reflection probe this also asks for costs it nothing.
+        let standalone = s.look.effects;
+        if standalone {
+            renderer.instant_exposure = true;
+        }
         renderer.render(&mut s.scene, target, w, h, &cam, &s.lighting);
+        if standalone {
+            renderer.instant_exposure = false;
+        }
     }
 
     /// A bus is there to show.
@@ -384,9 +404,12 @@ impl Showroom {
 /// the plain renderer, whatever the game's graphics setting: a preview is to be quick and
 /// clear, not the game's picture (no enhanced exposure and glow, no weather effects).
 /// The light of the chosen time and weather. `weather_lighting` is the game's own, so what
-/// comes back is already right; without `effects` the three the plain card never drew are
-/// taken out again (`wetness`, `snow`, `fog_density`) - a thumbnail of a bus in 75 m of
-/// ground fog would be a grey square.
+/// comes back is already right - including the renderer the settings ask for, which
+/// `launcher_statics` put within its reach when the launcher started.
+///
+/// Without `effects` six of its answers are taken back: the card beside the bus list is a
+/// thumbnail drawn on one fixed path, and a thumbnail of a bus in 75 m of ground fog would
+/// be a grey square. With them the picture is the game's.
 fn lighting_for(args: &Args, weather: &omsi_content::weather::Weather, effects: bool) -> Lighting {
     let clock = start_clock(args);
     let envir = omsi_content::Envir::load(&args.root.join("envir.cfg")).ok();
@@ -394,11 +417,15 @@ fn lighting_for(args: &Args, weather: &omsi_content::weather::Weather, effects: 
     let wetness = if effects { crate::weather_setup::initial_wetness(weather) } else { 0.0 };
     let mut l = weather_lighting(&daylight, weather, crate::weather_setup::cloud_drift_at(weather, clock.time), wetness, true);
     l.shadows = daylight.altitude_deg > 2.0;
-    // the showroom draws on one path whatever the settings say, here as before
-    l.enhanced = false;
-    l.classic = false;
-    l.detail = false;
-    if !effects {
+    if effects {
+        // `enhanced` and `classic` are already the settings' own; the detail grain is not
+        // one of the statics, so it comes from the settings here as it does in the game
+        // (`app_events.rs`). The file is read on a relight, not on a frame.
+        l.detail = crate::settings::Settings::load().detail_textures;
+    } else {
+        l.enhanced = false;
+        l.classic = false;
+        l.detail = false;
         l.wetness = 0.0;
         l.snow = 0.0;
         l.fog_density = 0.0;
@@ -466,5 +493,21 @@ mod tests {
         // the rest is the same light either way: only those three are held back
         assert_eq!(plain.sun_intensity, full.sun_intensity);
         assert_eq!(plain.shadows, full.shadows);
+    }
+
+    /// The editor draws in the renderer the settings ask for, the card on one fixed path.
+    /// (`ENHANCED` is the process-wide static `launcher_statics` fills from the settings;
+    /// no other test reads it, and this one puts it back as it found it.)
+    #[test]
+    fn only_a_page_that_asks_for_it_gets_the_enhanced_renderer() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let args = crate::cli::Args::parse_from(["openomsi"]);
+        let w = omsi_content::weather::Weather::default();
+        let before = crate::ENHANCED.load(Relaxed);
+        crate::ENHANCED.store(true, Relaxed);
+        let (plain, full) = (lighting_for(&args, &w, false), lighting_for(&args, &w, true));
+        crate::ENHANCED.store(before, Relaxed);
+        assert!(full.enhanced, "the editor follows the settings");
+        assert!(!plain.enhanced, "the card does not");
     }
 }

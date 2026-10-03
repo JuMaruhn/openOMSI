@@ -194,9 +194,11 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   June. Both set the same time and weather the Drive page's *Day & weather* step sets.
   Unlike that page's card, this one draws the weather whole, as the game draws it: fog at the
   file's own visibility, the wet sheen of a rained-on bus, the light snow throws back, and the
-  bus's own scripts told what is falling, so the drop film comes onto its windows. (The
-  picture is still drawn on one fixed path, so the Enhanced renderer's own effects are not
-  shown here.)
+  bus's own scripts told what is falling, so the drop film comes onto its windows. It is also
+  drawn in the renderer *Settings → Graphics* asks for, Enhanced included, so a weather's
+  visibility shows as the haze it is - the same bus under CAVOK and under *Sommerlich* (2 km)
+  is a clear sky and a hazy one. (The launcher's own window still sets ambient occlusion off
+  and keeps a small shadow map, for both this page and the Drive page.)
 * **Setup** - where the original installation and the game binary are. The OMSI 2 folder may
   be given as a path with quotes, as `Omsi.exe` itself or as a folder inside it; unpacked into
   the OMSI 2 folder itself, openOMSI keeps its own content in an `openOMSI` folder there and
