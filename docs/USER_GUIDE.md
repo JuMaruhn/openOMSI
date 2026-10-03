@@ -212,8 +212,12 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   driver's seat, **F2** a passenger's, **F3** the turning view of the whole bus;
   **Numpad 4 / 6** step through the eyes a bus offers of the kind in use
   (`view_interiorcam_minus` / `_plus`), **Numpad 8** puts every direction back
-  (`view_reset_all_directions`), and the **arrow keys** turn the view - round the bus outside,
-  the head inside. The mouse still drags and the wheel still zooms the outside view.
+  (`view_reset_all_directions`). The camera flies with the keys the game flies its free
+  camera with: **W / S** forward and back, **A / D** to the sides, **Q** down, **E** (or
+  Space) up, **Shift** five times as fast, and the **arrow keys** to turn. Dragging with the
+  mouse turns the view in every one of them - round the bus outside, the head inside - and
+  the wheel zooms the outside view. Flying is an offset from where a view puts the camera, so
+  F1, F2, F3 or Numpad 8 bring it back.
 * **Setup** - where the original installation and the game binary are. The OMSI 2 folder may
   be given as a path with quotes, as `Omsi.exe` itself or as a folder inside it; unpacked into
   the OMSI 2 folder itself, openOMSI keeps its own content in an `openOMSI` folder there and
@@ -228,8 +232,9 @@ Without a person at it: `OMSI_LAUNCHER_PAGE=drive:2` opens a page (and a Drive s
 `OMSI_LAUNCHER_EXIT=secs` closes it,
 `OMSI_LAUNCHER_INPUT="t=2 click 412,60; t=3 type 76; t=4 key Enter; t=5 shot a.png"` works
 it (logical pixels). `key` also presses a key of the window's own - `F1`..`F4`, `Num0`..`Num9`,
-`Left`, `Right`, `Up`, `Down` - and `hold Left` / `release Left` keep one down over several
-frames, which is how the Vehicle Editor's arrow keys are driven. The data side is `crates/omsi-launcher-core`:
+`Left`, `Right`, `Up`, `Down`, `W`, `A`, `S`, `D`, `Q`, `E`, `Space`, `Shift` - and
+`hold W` / `release W` keep one down over several frames, which is how the Vehicle Editor's
+camera is driven. The data side is `crates/omsi-launcher-core`:
 `openomsi-launcher --cli lines '{"map":"maps/Grundorf/global.cfg"}'` runs any of its commands
 from a terminal - `config`, `maps`, `vehicles`, `weather`, `lines`, `ibis`, `profiles`,
 `profile`, `mods`, `modinfo`, `install`, `instances`, `stop`, `log`, `join`, `settings`,

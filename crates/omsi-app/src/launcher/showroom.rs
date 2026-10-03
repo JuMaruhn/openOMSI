@@ -114,6 +114,8 @@ pub struct Showroom {
     /// (degrees). Both are the Vehicle Editor's: `render` only reads them with `effects`.
     pub view: EditorCam,
     pub look: (f32, f32),
+    /// Where the camera has been flown to from where its view puts it (world metres).
+    pan: DVec3,
     /// The picture: its texture and size, and whether it must be drawn again.
     target: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
     dirty: bool,
@@ -165,6 +167,7 @@ impl Showroom {
             wetness: 0.0,
             view: EditorCam::default(),
             look: (0.0, 0.0),
+            pan: DVec3::ZERO,
             target: None,
             dirty: true,
             generation: 0,
@@ -192,10 +195,74 @@ impl Showroom {
         self.idle = 0.0;
     }
 
-    /// Everything looking where it looked at the start (`view_reset_all_directions`).
+    /// Everything looking where it looked at the start, and the camera back where its view
+    /// puts it (`view_reset_all_directions`).
     pub fn reset_turn(&mut self) {
         (self.yaw_to, self.pitch_to, self.zoom_to) = (START_YAW, START_PITCH, 1.0);
         self.look = (0.0, 0.0);
+        self.pan = DVec3::ZERO;
+        self.idle = 0.0;
+    }
+
+    /// The picture shown is the Vehicle Editor's, the only page with the inside views.
+    fn editor(&self) -> bool {
+        self.shown.as_ref().is_some_and(|s| s.look.effects)
+    }
+
+    /// Where the camera looks now (yaw, pitch in degrees), whichever view it stands in.
+    fn aim(&self) -> (f32, f32) {
+        let inside = self.shown.as_ref().and_then(|s| {
+            let c = interior_camera(s, self.view)?;
+            let (_, y, p) = s.vehicle.as_ref()?.camera_world(&c);
+            Some((y + self.look.0, p + self.look.1))
+        });
+        // (`render` builds the outside camera with `-pitch`: positive pitch looks down on
+        // the bus, so the view's own pitch is the other way round)
+        inside.unwrap_or((self.yaw, -self.pitch))
+    }
+
+    /// Fly the camera `metres` along its own axes - forward, to the right, upwards - as the
+    /// game flies its free camera with W/A/S/D/Q/E (`app_events`). It is an offset from
+    /// where the view puts the camera, so F1, F2, F3 and Numpad 8 bring it back.
+    pub fn fly(&mut self, fwd: f32, right: f32, up: f32, metres: f32) {
+        let (yaw, pitch) = self.aim();
+        let (sy, cy) = yaw.to_radians().sin_cos();
+        let (sp, cp) = pitch.to_radians().sin_cos();
+        let f = DVec3::new((sy * cp) as f64, (cy * cp) as f64, sp as f64);
+        // level with the ground, to the right of the view (x east, y north, z up)
+        let r = DVec3::new(cy as f64, -sy as f64, 0.0);
+        let v = f * fwd as f64 + r * right as f64 + DVec3::Z * up as f64;
+        if v.length_squared() > 1e-9 {
+            self.pan += v.normalize() * metres as f64;
+            self.dirty = true;
+            self.idle = 0.0;
+        }
+    }
+
+    /// Turn the view it is in by so many degrees (the arrow keys, which say how far they
+    /// mean to turn; `drag` takes the mouse's pixels and puts its own gain on them).
+    pub fn drag_by_degrees(&mut self, dx: f32, dy: f32) {
+        if drag_orbits(self.editor(), self.view) {
+            self.turn(dx, dy);
+            return;
+        }
+        self.look.0 += dx;
+        self.look.1 = (self.look.1 - dy).clamp(-85.0, 85.0);
+        self.dirty = true;
+        self.idle = 0.0;
+    }
+
+    /// The mouse dragged over the picture: it turns the view it is in - round the bus
+    /// outside, the head inside, as the game turns a head in the cab. Only the Vehicle
+    /// Editor has the inside views, so the card beside the bus list always turns.
+    pub fn drag(&mut self, dx: f32, dy: f32) {
+        if drag_orbits(self.editor(), self.view) {
+            self.orbit(dx, dy);
+            return;
+        }
+        self.look.0 += dx * 0.35;
+        self.look.1 = (self.look.1 - dy * 0.25).clamp(-85.0, 85.0);
+        self.dirty = true;
         self.idle = 0.0;
     }
 
@@ -407,7 +474,7 @@ impl Showroom {
 
     fn render(&mut self, renderer: &mut Renderer, target: &wgpu::TextureView, w: u32, h: u32) {
         let (yaw, pitch, zoom, focus) = (self.yaw, self.pitch, self.zoom, self.focus_now);
-        let (view, look) = (self.view, self.look);
+        let (view, look, pan) = (self.view, self.look, self.pan);
         let Some(s) = self.shown.as_mut() else { return };
         let fov = 30.0f32;
         let aspect = w as f32 / h.max(1) as f32;
@@ -420,7 +487,7 @@ impl Showroom {
         let dist = (fit * zoom).max(8.0);
         let (sy, cy) = yaw.to_radians().sin_cos();
         let (sp, cp) = pitch.to_radians().sin_cos();
-        let target_pt = DVec3::new(s.centre.x as f64, s.centre.y as f64, (s.centre.z * 0.75) as f64);
+        let target_pt = DVec3::new(s.centre.x as f64, s.centre.y as f64, (s.centre.z * 0.75) as f64) + pan;
         // from the camera towards the bus: forward along the yaw, down by the pitch
         let dir = DVec3::new((sy * cp) as f64, (cy * cp) as f64, -sp as f64);
         let mut pos = target_pt - dir * dist as f64;
@@ -437,7 +504,7 @@ impl Showroom {
             if let (Some(c), Some(v)) = (interior_camera(s, view), s.vehicle.as_ref()) {
                 let (eye, cyaw, cpitch) = v.camera_world(&c);
                 let fov = if c.fov > 1.0 { c.fov } else { 50.0 };
-                cam = Camera { position: eye, yaw: cyaw + look.0, pitch: cpitch + look.1, roll: 0.0, fov_deg: fov, near: 0.05, far: 6000.0 };
+                cam = Camera { position: eye + pan, yaw: cyaw + look.0, pitch: cpitch + look.1, roll: 0.0, fov_deg: fov, near: 0.05, far: 6000.0 };
             }
         }
         s.scene.overlays.clear();
@@ -581,6 +648,13 @@ fn weather_to_scripts(vehicle: &mut omsi_sim::VehicleInstance, weather: &omsi_co
     last
 }
 
+/// Whether a drag turns the picture round the bus rather than turning a head inside it.
+/// Outside it always does, and so does every page but the Vehicle Editor: the card beside
+/// the bus list has no inside view to turn a head in.
+fn drag_orbits(editor: bool, view: EditorCam) -> bool {
+    !editor || view == EditorCam::Outside
+}
+
 /// The bus's own camera a view names, taken as the game takes it: from `[camera_std]`
 /// onwards, wrapping (`camera_util::driver_eye`). None outside, or where the bus gives none.
 fn interior_camera(s: &Shown, view: EditorCam) -> Option<omsi_vehicle::Camera> {
@@ -655,6 +729,16 @@ mod tests {
         // the rest is the same light either way: only those three are held back
         assert_eq!(plain.sun_intensity, full.sun_intensity);
         assert_eq!(plain.shadows, full.shadows);
+    }
+
+    /// A drag turns the head inside the bus and the picture round it outside - but only on
+    /// the page that has the inside views at all.
+    #[test]
+    fn a_drag_turns_the_head_inside_and_the_picture_outside() {
+        assert!(drag_orbits(true, EditorCam::Outside), "outside it turns the picture");
+        assert!(!drag_orbits(true, EditorCam::Driver(0)), "at the wheel it turns the head");
+        assert!(!drag_orbits(true, EditorCam::Pax(1)), "and in the saloon");
+        assert!(drag_orbits(false, EditorCam::Driver(0)), "the card always turns the picture");
     }
 
     /// The editor draws in the renderer its own button is set to, each of the three a

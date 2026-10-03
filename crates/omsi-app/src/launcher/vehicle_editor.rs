@@ -48,10 +48,15 @@ impl Default for EditorView {
     }
 }
 
-/// How fast a held arrow key turns the view (degrees a second). Inside the bus the head
-/// turns slower than the picture swings round it outside.
-const TURN_OUTSIDE: f32 = 90.0;
-const TURN_INSIDE: f32 = 70.0;
+/// How fast a held arrow key turns the view (degrees a second), as the game turns its free
+/// camera: 60 in yaw, 40 in pitch (`app_events`).
+const TURN_YAW: f32 = 60.0;
+const TURN_PITCH: f32 = 40.0;
+/// How fast W/A/S/D/Q/E fly it (m/s), and what Shift multiplies that by. The game flies at
+/// 30 m/s across a city; this stage is one bus long, so it goes at a walk and the boost is
+/// the game's own factor of 5.
+const FLY: f32 = 5.0;
+const FLY_BOOST: f32 = 5.0;
 
 /// A key pressed while this page has the keyboard. Returns whether it was one of ours.
 ///
@@ -100,24 +105,24 @@ fn stepped(view: EditorCam, by: i32, n: usize) -> EditorCam {
     }
 }
 
-/// The arrow keys held this frame turn the view: about the bus outside, the head inside.
-/// They are the keys the game flies its free camera with (`flies_free_camera`).
-fn arrows(l: &mut super::Launcher, dt: f32) {
+/// The keys held this frame fly and turn the camera, exactly the set the game flies its own
+/// free camera with (`input_script::flies_free_camera`): W and S forward and back, A and D
+/// to the sides, Q down and E (or Space) up, Shift to hurry, and the arrow keys to turn.
+///
+/// Flying is an offset from where the view puts the camera, so it works in the cab and in
+/// the saloon as well as round the bus, and F1, F2, F3 or Numpad 8 bring it back.
+fn fly_keys(l: &mut super::Launcher, dt: f32) {
     let down = |c: KeyCode| l.held.contains(&c);
-    let x = down(KeyCode::ArrowRight) as i32 - down(KeyCode::ArrowLeft) as i32;
-    let y = down(KeyCode::ArrowDown) as i32 - down(KeyCode::ArrowUp) as i32;
-    if (x, y) == (0, 0) {
-        return;
+    let axis = |a: KeyCode, b: KeyCode| down(a) as i32 as f32 - down(b) as i32 as f32;
+    let (fwd, right) = (axis(KeyCode::KeyW, KeyCode::KeyS), axis(KeyCode::KeyD, KeyCode::KeyA));
+    let up = (down(KeyCode::KeyE) || down(KeyCode::Space)) as i32 as f32 - down(KeyCode::KeyQ) as i32 as f32;
+    if (fwd, right, up) != (0.0, 0.0, 0.0) {
+        let boost = if down(KeyCode::ShiftLeft) || down(KeyCode::ShiftRight) { FLY_BOOST } else { 1.0 };
+        l.showroom.fly(fwd, right, up, FLY * boost * dt);
     }
-    match l.showroom.view {
-        EditorCam::Outside => l.showroom.turn(x as f32 * TURN_OUTSIDE * dt, y as f32 * TURN_OUTSIDE * dt),
-        _ => {
-            let k = TURN_INSIDE * dt;
-            l.showroom.look.0 += x as f32 * k;
-            // (as far as a head turns in the cab, `cab_look_yaw`'s range for the pitch)
-            l.showroom.look.1 = (l.showroom.look.1 - y as f32 * k).clamp(-85.0, 85.0);
-            l.showroom.redraw();
-        }
+    let (dx, dy) = (axis(KeyCode::ArrowRight, KeyCode::ArrowLeft), axis(KeyCode::ArrowDown, KeyCode::ArrowUp));
+    if (dx, dy) != (0.0, 0.0) {
+        l.showroom.drag_by_degrees(dx * TURN_YAW * dt, dy * TURN_PITCH * dt);
     }
 }
 
@@ -139,7 +144,7 @@ pub fn draw(l: &mut Launcher, r: Rect) {
     );
     // the bus has the page to itself: the panel is a card in a corner, not a column beside
     // it, so the showroom frames it in the middle (`focus` 0.5) rather than to one side
-    arrows(l, l.ui.dt);
+    fly_keys(l, l.ui.dt);
     l.preview_full(page, 0.5);
     buttons(l, panel);
     l.showroom_pointer(page);

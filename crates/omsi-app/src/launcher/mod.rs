@@ -459,7 +459,7 @@ impl ApplicationHandler for Launcher {
                 let p = Vec2::new(position.x as f32, position.y as f32) / scale;
                 if let Some(last) = self.dragging {
                     let d = p - last;
-                    self.showroom.orbit(d.x, d.y);
+                    self.showroom.drag(d.x, d.y);
                     self.dragging = Some(p);
                 }
                 self.ui.input.mouse = p;
@@ -1389,6 +1389,14 @@ fn script_key(name: &str) -> Option<KeyCode> {
         "num7" => KeyCode::Numpad7,
         "num8" => KeyCode::Numpad8,
         "num9" => KeyCode::Numpad9,
+        "w" => KeyCode::KeyW,
+        "a" => KeyCode::KeyA,
+        "s" => KeyCode::KeyS,
+        "d" => KeyCode::KeyD,
+        "q" => KeyCode::KeyQ,
+        "e" => KeyCode::KeyE,
+        "space" => KeyCode::Space,
+        "shift" => KeyCode::ShiftLeft,
         "left" => KeyCode::ArrowLeft,
         "right" => KeyCode::ArrowRight,
         "up" => KeyCode::ArrowUp,
