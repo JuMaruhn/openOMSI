@@ -115,6 +115,8 @@ struct HdrTargets {
     /// Tone mapping with the adapted exposure in `adapt[k]`.
     tonemap_bg: [wgpu::BindGroup; 2],
     fxaa_bg: wgpu::BindGroup,
+    /// Classic shading is presented directly, without the Enhanced tone curve.
+    classic_bg: wgpu::BindGroup,
     /// Allocated only when wet roads need scene reflections in the main view.
     puddles: Option<puddles::Targets>,
 }
@@ -653,10 +655,6 @@ pub struct GpuTexture {
     gen: u64,
 }
 
-/// Which picture is behind the glass: the Enhanced path's glow level (true) or the plain
-/// graphics' copy (false), for a window picture of this size.
-type GlassKey = (bool, u32, u32);
-
 static TEXTURE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn next_gen() -> u64 {
@@ -1003,10 +1001,8 @@ pub struct Instance {
 pub struct Scene {
     pub meshes: Vec<GpuMesh>,
     pub textures: Vec<GpuTexture>,
-    /// The texture slot the rain films read the picture behind the glass from (last
-    /// frame's, see `Renderer::glass_behind`), and which picture it shows now.
+    /// Texture slot read by procedural rain films.
     glass_slot: Option<TextureId>,
-    glass_key: Option<GlassKey>,
     pub materials: Vec<Material>,
     pub instances: Vec<Instance>,
     /// World position everything is expressed relative to on the GPU (updated per frame).
@@ -1025,14 +1021,14 @@ pub struct Scene {
     /// Runs of this frame's coronas by picture: (texture, first, count).
     /// (and whether the run belongs to the vehicle the camera is in, drawn after it)
     corona_runs: Vec<(u16, u32, u32, bool)>,
-    model_buf: Option<wgpu::Buffer>,
-    params_buf: Option<wgpu::Buffer>,
-    light_buf: Option<wgpu::Buffer>,
-    grid_buf: Option<wgpu::Buffer>,
+    model_buf: Option<GpuArray>,
+    params_buf: Option<GpuArray>,
+    light_buf: Option<GpuArray>,
+    grid_buf: Option<GpuArray>,
     corona_buf: Option<wgpu::Buffer>,
     corona_count: u32,
     /// The frame's draw list (see `Batch`), shared by the shadow, prepass and main passes.
-    draw_buf: Option<wgpu::Buffer>,
+    draw_buf: Option<GpuArray>,
     camera_bind_group: Option<wgpu::BindGroup>,
     shadow_bind_group: Option<wgpu::BindGroup>,
     sky_bind_group: Option<wgpu::BindGroup>,
@@ -1124,18 +1120,12 @@ impl Scene {
                 }
             }
         }
-        let other = [
-            &self.model_buf,
-            &self.params_buf,
-            &self.light_buf,
-            &self.grid_buf,
-            &self.corona_buf,
-            &self.draw_buf,
-        ]
-        .iter()
-        .filter_map(|b| b.as_ref())
-        .map(|b| b.size())
-        .sum();
+        let other = [&self.model_buf, &self.params_buf, &self.light_buf, &self.grid_buf, &self.draw_buf]
+            .iter()
+            .filter_map(|b| b.as_ref())
+            .map(|b| b.gpu_bytes())
+            .sum::<u64>()
+            + self.corona_buf.as_ref().map_or(0, |b| b.size());
         (tex, mesh, other)
     }
 }
@@ -1156,6 +1146,8 @@ struct PostPipelines {
 /// The pipelines of the main pass for one colour target format: the swap chain's, and
 /// the high-range one of the enhanced path.
 struct PassPipelines {
+    /// Single-sampled films, drawn after resolving the scene and its reflections.
+    rain_pipelines: Vec<wgpu::RenderPipeline>,
     /// Indexed by `pipe_code`: 4 depth/blend kinds x culled x depth-biased.
     pipelines: Vec<wgpu::RenderPipeline>,
     corona_pipeline: wgpu::RenderPipeline,
@@ -1174,6 +1166,174 @@ static GL_BACKEND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// Whether the device draws on OpenGL (known once a renderer is made).
 pub fn gl_backend() -> bool {
     GL_BACKEND.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How the per-draw arrays (the model matrices, the instance parameters, the draw list) and
+/// the point lights reach the scene shader on this device (set in `Renderer::new_on`).
+/// Older OpenGL chips cannot read a storage buffer in a vertex shader - an Intel HD 2500, a
+/// Mali on GLES ("Downlevel flags VERTEX_STORAGE are required but not supported", the
+/// renderer was never made, #770, #316) - or have no storage buffers at all (OpenGL below
+/// 4.3, GLES 3.0): for them the arrays are textures the vertex shader reads texel by texel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum ArrayPath {
+    /// Storage buffers everywhere (every Metal, Vulkan and DirectX 12 device).
+    Storage,
+    /// The vertex shader's arrays are textures; the lights stay storage buffers.
+    VertexTextures,
+    /// No storage buffers at all: the arrays are textures, and the point lights (the street
+    /// lamps, headlights and interior lamps lit per pixel) are left out - the sixteen
+    /// textures a fragment shader may read here are all taken.
+    NoStorage,
+}
+
+static ARRAY_PATH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn array_path() -> ArrayPath {
+    match ARRAY_PATH.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => ArrayPath::VertexTextures,
+        2 => ArrayPath::NoStorage,
+        _ => ArrayPath::Storage,
+    }
+}
+
+/// Texels per row of an array kept as a texture (within every device's 2048).
+const ARRAY_TEX_WIDTH: u32 = 2048;
+
+/// A read-only array of the scene shader: a storage buffer, or where the device cannot
+/// read one (see `ArrayPath`) a texture of one value per texel - four floats
+/// (`Rgba32Float`, 16 bytes) or one `u32` (`R32Uint`) - in rows of `ARRAY_TEX_WIDTH`.
+enum GpuArray {
+    Buffer(wgpu::Buffer),
+    Texture { texture: wgpu::Texture, view: wgpu::TextureView, texel: u32 },
+    /// Not bound on this device (the lights under `ArrayPath::NoStorage`): takes any write.
+    Unused,
+}
+
+impl GpuArray {
+    /// An array of `size` bytes of `texel`-byte values (16 or 4), a texture where the
+    /// vertex shader reads it on a device without vertex storage (`vertex`), or without any.
+    fn new(device: &wgpu::Device, label: &str, size: u64, texel: u32, vertex: bool) -> GpuArray {
+        let path = array_path();
+        if path == ArrayPath::Storage || (!vertex && path == ArrayPath::VertexTextures) {
+            return GpuArray::Buffer(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: size.max(16).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        if !vertex {
+            return GpuArray::Unused;
+        }
+        let texels = size.div_ceil(texel as u64).max(1);
+        let max_rows = device.limits().max_texture_dimension_2d;
+        let rows = (texels.div_ceil(ARRAY_TEX_WIDTH as u64) as u32).clamp(1, max_rows);
+        if rows == max_rows {
+            log::warn!("{label}: {texels} values do not fit a texture of {ARRAY_TEX_WIDTH} x {max_rows}; the rest are not drawn");
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: ARRAY_TEX_WIDTH, height: rows, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: if texel == 16 { wgpu::TextureFormat::Rgba32Float } else { wgpu::TextureFormat::R32Uint },
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&Default::default());
+        GpuArray::Texture { texture, view, texel }
+    }
+
+    /// Its room in bytes.
+    fn size(&self) -> u64 {
+        match self {
+            GpuArray::Buffer(b) => b.size(),
+            GpuArray::Texture { texture, texel, .. } => texture.width() as u64 * texture.height() as u64 * *texel as u64,
+            GpuArray::Unused => u64::MAX,
+        }
+    }
+
+    /// Bytes it takes on the GPU (for the memory summary).
+    fn gpu_bytes(&self) -> u64 {
+        match self {
+            GpuArray::Unused => 0,
+            a => a.size(),
+        }
+    }
+
+    /// Write `data` at byte `offset` (both whole values); what runs past its end is dropped.
+    fn write(&self, queue: &wgpu::Queue, offset: u64, data: &[u8]) {
+        match self {
+            GpuArray::Buffer(b) => queue.write_buffer(b, offset, data),
+            GpuArray::Texture { texture, texel, .. } => {
+                let t = *texel as usize;
+                let total = texture.width() as u64 * texture.height() as u64;
+                let mut data = data;
+                for (x, y, width, rows) in array_tex_spans(offset / t as u64, (data.len() / t) as u64, total) {
+                    let bytes = (width * rows) as usize * t;
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All },
+                        &data[..bytes],
+                        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(width * t as u32), rows_per_image: None },
+                        wgpu::Extent3d { width, height: rows, depth_or_array_layers: 1 },
+                    );
+                    data = &data[bytes..];
+                }
+            }
+            GpuArray::Unused => {}
+        }
+    }
+
+    fn binding(&self) -> wgpu::BindingResource<'_> {
+        match self {
+            GpuArray::Buffer(b) => b.as_entire_binding(),
+            GpuArray::Texture { view, .. } => wgpu::BindingResource::TextureView(view),
+            GpuArray::Unused => unreachable!("an unused array is not bound"),
+        }
+    }
+}
+
+/// The rectangles (x, y, width, rows) of an array texture `ARRAY_TEX_WIDTH` wide and
+/// `total` texels big that `n` values from value `at` on fill, in order: the rest of a row,
+/// whole rows, the start of the last row. What runs past the end is left out.
+fn array_tex_spans(mut at: u64, n: u64, total: u64) -> Vec<(u32, u32, u32, u32)> {
+    let w = ARRAY_TEX_WIDTH as u64;
+    let mut left = n.min(total.saturating_sub(at));
+    let mut out = Vec::new();
+    while left > 0 {
+        let (x, y) = (at % w, at / w);
+        let (width, rows) = if x == 0 && left >= w { (w, left / w) } else { ((w - x).min(left), 1) };
+        out.push((x as u32, y as u32, width as u32, rows as u32));
+        at += width * rows;
+        left -= width * rows;
+    }
+    out
+}
+
+/// The bind group layout entry of a scene array read in `stage` (see `GpuArray`):
+/// `float4` for vec4 values, else u32.
+fn array_layout_entry(binding: u32, stage: wgpu::ShaderStages, float4: bool) -> wgpu::BindGroupLayoutEntry {
+    let texture = match array_path() {
+        ArrayPath::Storage => false,
+        ArrayPath::VertexTextures => stage.contains(wgpu::ShaderStages::VERTEX),
+        ArrayPath::NoStorage => true,
+    };
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: stage,
+        ty: if texture {
+            wgpu::BindingType::Texture {
+                sample_type: if float4 { wgpu::TextureSampleType::Float { filterable: false } } else { wgpu::TextureSampleType::Uint },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            }
+        } else {
+            wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }
+        },
+        count: None,
+    }
 }
 
 /// Wait until the GPU has done `submission` (None: everything submitted so far).
@@ -1238,6 +1398,7 @@ pub struct Renderer {
     material_layout: wgpu::BindGroupLayout,
     pass: PassPipelines,
     hdr_pass: Option<PassPipelines>,
+    reflection_pass: Option<PassPipelines>,
     corona_bind_group: wgpu::BindGroup,
     /// The smoke texture (`Texture/rauch.tga`, see [`Renderer::set_smoke_texture`]).
     smoke_bind_group: wgpu::BindGroup,
@@ -1361,14 +1522,12 @@ pub struct Renderer {
     /// Render scale: the pipeline that scales the 3D picture up to the window, its
     /// parameters, and the smaller targets per size (with their bind groups).
     upscale_pipeline: wgpu::RenderPipeline,
+    copy_pipeline: wgpu::RenderPipeline,
     upscale_layout: wgpu::BindGroupLayout,
     upscale_buf: wgpu::Buffer,
     scale_targets: HashMap<(u32, u32), (wgpu::TextureView, wgpu::BindGroup)>,
-    /// The plain graphics' copy of the last picture at half its size, for the rain on the
-    /// glass (the Enhanced path has its glow's first level for that).
-    glass_prev: Option<(wgpu::TextureView, (u32, u32))>,
-    /// The picture behind the glass drawn by the last window frame, for the next one.
-    glass_live: Option<GlassKey>,
+    /// Full-resolution current scene before rain films, in its original colour format.
+    glass_picture: Option<wgpu::TextureView>,
     /// When each size of the size-keyed targets (scale, MSAA, HDR) was last asked for.
     target_use: HashMap<(u32, u32), std::time::Instant>,
     /// The game's frame-rate governor on top of the render scale (1 = none; see
@@ -1532,8 +1691,8 @@ pub const LAMP_CODE_STRIDE: u32 = 64;
 const MASK_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// The colour targets of a pipeline drawing into `format`: in the enhanced pass (the only
-/// one drawing into `HDR_FORMAT` with these pipelines) with the screen mask beside it,
+/// The colour targets of a pipeline drawing into `format`: Enhanced and classic puddle
+/// shading draw into `HDR_FORMAT` with the screen mask beside it,
 /// written by the scene's own shader only (`mask`), coverage-blended where the colour is.
 fn color_targets(format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>, write: wgpu::ColorWrites, mask: bool) -> Vec<Option<wgpu::ColorTargetState>> {
     let mut v = vec![Some(wgpu::ColorTargetState { format, blend, write_mask: write })];
@@ -1775,6 +1934,24 @@ impl Renderer {
             // textures are decoded to RGBA by upload_texture on this device.
             required_features = wgpu::Features::empty();
         }
+        // the per-draw arrays as storage buffers where the device reads them in a vertex
+        // shader (three there, two lights arrays in a fragment shader), else as textures;
+        // OMSI_GPU_ARRAYS=textures|nostorage takes those paths on any device
+        let downlevel = adapter.get_downlevel_capabilities().flags;
+        let storage = limits.max_storage_buffers_per_shader_stage;
+        let path = match omsi_cfg::env::var("OMSI_GPU_ARRAYS").as_deref() {
+            Ok("textures") => ArrayPath::VertexTextures,
+            Ok("nostorage") => ArrayPath::NoStorage,
+            _ if !downlevel.contains(wgpu::DownlevelFlags::FRAGMENT_STORAGE) || storage < 2 => ArrayPath::NoStorage,
+            _ if !downlevel.contains(wgpu::DownlevelFlags::VERTEX_STORAGE) || storage < 3 => ArrayPath::VertexTextures,
+            _ => ArrayPath::Storage,
+        };
+        ARRAY_PATH.store(path as u8, std::sync::atomic::Ordering::Relaxed);
+        match path {
+            ArrayPath::Storage => {}
+            ArrayPath::VertexTextures => log::warn!("{}: no storage buffers in vertex shaders; the scene's arrays are read from textures", info.name),
+            ArrayPath::NoStorage => log::warn!("{}: no storage buffers; the scene's arrays are read from textures and the lamps light no pixels of their own", info.name),
+        }
         log::info!("opening graphics device: {} ({:?}, vendor {:#06x}, device {:#06x}), features {:?}, max buffer {} MB, max storage binding {} MB", info.name, info.backend, info.vendor, info.device, required_features, limits.max_buffer_size / 1_000_000, limits.max_storage_buffer_binding_size as u64 / 1_000_000);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -1949,41 +2126,12 @@ impl Renderer {
                     },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 10,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                array_layout_entry(1, wgpu::ShaderStages::VERTEX, true),
+                array_layout_entry(2, wgpu::ShaderStages::VERTEX, true),
+                array_layout_entry(10, wgpu::ShaderStages::VERTEX, false),
             ],
         });
-        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("camera"),
-            entries: &[
+        let mut camera_entries = vec![
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
@@ -1994,46 +2142,8 @@ impl Renderer {
                     },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                array_layout_entry(1, wgpu::ShaderStages::VERTEX, true),
+                array_layout_entry(2, wgpu::ShaderStages::VERTEX, true),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -2076,16 +2186,7 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 10,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
+                array_layout_entry(10, wgpu::ShaderStages::VERTEX, false),
                 // enhanced: its lighting, the reflection probe, a clamped linear sampler, the sky table
                 wgpu::BindGroupLayoutEntry {
                     binding: 11,
@@ -2154,7 +2255,15 @@ impl Renderer {
                     },
                     count: None,
                 },
-            ],
+        ];
+        // the point lights and their grid (see `ArrayPath::NoStorage`)
+        if array_path() != ArrayPath::NoStorage {
+            camera_entries.push(array_layout_entry(3, wgpu::ShaderStages::FRAGMENT, true));
+            camera_entries.push(array_layout_entry(4, wgpu::ShaderStages::FRAGMENT, false));
+        }
+        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("camera"),
+            entries: &camera_entries,
         });
         let lm_atlas = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("light map atlas"),
@@ -2329,8 +2438,9 @@ impl Renderer {
                     depth_write: bool,
                     cull: bool,
                     bias: i32,
-                    alpha_to_coverage: bool| {
-            let use_alpha_to_coverage = alpha_to_coverage && msaa > 1;
+                    alpha_to_coverage: bool,
+                    samples: u32| {
+            let use_alpha_to_coverage = alpha_to_coverage && samples > 1;
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("omsi"),
                 layout: Some(&layout),
@@ -2360,7 +2470,7 @@ impl Renderer {
                     },
                 }),
                 multisample: wgpu::MultisampleState {
-                    count: msaa,
+                    count: samples,
                     mask: !0,
                     alpha_to_coverage_enabled: use_alpha_to_coverage,
                 },
@@ -2395,7 +2505,7 @@ impl Renderer {
             .and_then(|v| v.parse().ok())
             .unwrap_or(-24);
         // one pipeline per `pipe_code`: the kind decides blending and the depth write
-        let scene_pipelines = |f: wgpu::TextureFormat, fs: &str| -> Vec<wgpu::RenderPipeline> {
+        let scene_pipelines = |f: wgpu::TextureFormat, fs: &str, samples: u32| -> Vec<wgpu::RenderPipeline> {
             let mut out = Vec::with_capacity(PIPE_KINDS as usize * 4);
             for kind in 0..PIPE_KINDS {
                 let blend = (kind == PIPE_BLEND || kind == PIPE_BLEND_NO_WRITE)
@@ -2411,6 +2521,7 @@ impl Renderer {
                             cull,
                             if surface { bias } else { 0 },
                             kind == PIPE_ALPHA_TEST,
+                            samples,
                         ));
                     }
                 }
@@ -2882,7 +2993,8 @@ impl Renderer {
             })
         };
         let pass = PassPipelines {
-            pipelines: scene_pipelines(format, "fs_main"),
+            pipelines: scene_pipelines(format, "fs_main", msaa),
+            rain_pipelines: scene_pipelines(format, "fs_main", 1),
             corona_pipeline: corona_pipeline_for(format, "fs_main", screen),
             smoke_pipeline: corona_pipeline_for(format, "fs_smoke", alpha_blend),
             sky_pipeline: sky_pipeline_for(format, "fs_main"),
@@ -2890,10 +3002,18 @@ impl Renderer {
         // the enhanced path: its own lighting in all three
         let leave_out_enhanced = options.no_enhanced && (cfg!(target_os = "android") || adapter_name.to_ascii_lowercase().contains("opengl") || GL_BACKEND.load(std::sync::atomic::Ordering::Relaxed));
         let hdr_pass = (!leave_out_enhanced).then(|| PassPipelines {
-            pipelines: scene_pipelines(hdr_format, "fs_enhanced"),
+            pipelines: scene_pipelines(hdr_format, "fs_enhanced", msaa),
+            rain_pipelines: scene_pipelines(hdr_format, "fs_enhanced", 1),
             corona_pipeline: corona_pipeline_for(hdr_format, "fs_enhanced", additive),
             smoke_pipeline: corona_pipeline_for(hdr_format, "fs_smoke_enhanced", alpha_blend),
             sky_pipeline: sky_pipeline_for(hdr_format, "fs_enhanced"),
+        });
+        let reflection_pass = (!leave_out_enhanced && !GL_BACKEND.load(std::sync::atomic::Ordering::Relaxed)).then(|| PassPipelines {
+            pipelines: scene_pipelines(hdr_format, "fs_vanilla_reflections", msaa),
+            rain_pipelines: scene_pipelines(hdr_format, "fs_vanilla_reflections", 1),
+            corona_pipeline: corona_pipeline_for(hdr_format, "fs_main", screen),
+            smoke_pipeline: corona_pipeline_for(hdr_format, "fs_smoke", alpha_blend),
+            sky_pipeline: sky_pipeline_for(hdr_format, "fs_main"),
         });
         let sky_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -3818,7 +3938,7 @@ impl Renderer {
             bind_group_layouts: &[Some(&upscale_layout)],
             immediate_size: 0,
         });
-        let upscale_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let upscale_pipeline_for = |entry| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("upscale"),
             layout: Some(&upscale_pl),
             vertex: wgpu::VertexState {
@@ -3836,7 +3956,7 @@ impl Renderer {
             multisample: Default::default(),
             fragment: Some(wgpu::FragmentState {
                 module: &upscale_shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(entry),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: None,
@@ -3847,6 +3967,8 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+        let upscale_pipeline = upscale_pipeline_for("fs_main");
+        let copy_pipeline = upscale_pipeline_for("fs_copy");
         let upscale_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("upscale params"),
             size: 16,
@@ -3861,11 +3983,11 @@ impl Renderer {
         Renderer {
             _device_poller: DevicePoller::start(&device),
             upscale_pipeline,
+            copy_pipeline,
             upscale_layout,
             upscale_buf,
             scale_targets: HashMap::new(),
-            glass_prev: None,
-            glass_live: None,
+            glass_picture: None,
             target_use: HashMap::new(),
             dynamic_scale: std::cell::Cell::new(1.0),
             flicker: std::cell::RefCell::new(HashMap::new()),
@@ -3927,6 +4049,7 @@ impl Renderer {
             material_layout,
             pass,
             hdr_pass,
+            reflection_pass,
             corona_bind_group,
             smoke_bind_group,
             corona_textures: Vec::new(),
@@ -3976,6 +4099,12 @@ impl Renderer {
             pending_meshes: Default::default(),
             freed: std::cell::OnceCell::new(),
         }
+    }
+
+    fn main_pass(&self, enhanced: bool, reflections: bool) -> &PassPipelines {
+        if enhanced { self.hdr_pass.as_ref().unwrap() }
+        else if reflections { self.reflection_pass.as_ref().unwrap() }
+        else { &self.pass }
     }
 
     pub fn format(&self) -> wgpu::TextureFormat {
@@ -4039,31 +4168,26 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = tex.create_view(&Default::default());
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("upscale"),
-            layout: &self.upscale_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.upscale_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.post_sampler),
-                },
-            ],
-        });
+        let bg = self.picture_group(&view);
         self.scale_targets
             .insert((w, h), (view.clone(), bg.clone()));
         (view, bg)
+    }
+
+    fn picture_group(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("scene picture"),
+            layout: &self.upscale_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.upscale_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.post_sampler) },
+            ],
+        })
     }
 
     pub fn new_scene(&self) -> Scene {
@@ -4071,7 +4195,6 @@ impl Renderer {
             meshes: Vec::new(),
             textures: Vec::new(),
             glass_slot: None,
-            glass_key: None,
             materials: Vec::new(),
             instances: Vec::new(),
             render_origin: DVec3::ZERO,
@@ -4206,6 +4329,8 @@ impl Renderer {
         img: &omsi_texture::Image,
         mipmaps: bool,
     ) -> TextureId {
+        let fitted = fit_image(img, self.device.limits().max_texture_dimension_2d);
+        let img = fitted.as_ref().unwrap_or(img);
         let t = if mipmaps && img.width > 1 && img.height > 1 {
             self.upload_texture_gpu_mips(img)
         } else {
@@ -4216,7 +4341,7 @@ impl Renderer {
     }
 
     pub fn add_blank_texture(&self, scene: &mut Scene, width: u32, height: u32) -> TextureId {
-        let (width, height) = (width.max(1), height.max(1));
+        let (width, height) = fit_size(width.max(1), height.max(1), self.device.limits().max_texture_dimension_2d);
         // A newly allocated GPU texture has undefined contents. Script displays may be
         // sampled before their first `STUnlock`, so initialise them as transparent rather
         // than briefly showing arbitrary solid pixels on new or AI vehicles.
@@ -4495,6 +4620,7 @@ impl Renderer {
 
     /// A texture the scene can be rendered into (`render_to_texture`), e.g. a rear-view mirror.
     pub fn add_render_texture(&self, scene: &mut Scene, width: u32, height: u32) -> TextureId {
+        let (width, height) = fit_size(width.max(1), height.max(1), self.device.limits().max_texture_dimension_2d);
         let size = wgpu::Extent3d {
             width,
             height,
@@ -4546,7 +4672,15 @@ impl Renderer {
 
     /// Replace the pixels of a texture (same size as when created, no mipmaps regenerated).
     pub fn update_texture(&self, scene: &Scene, id: TextureId, img: &omsi_texture::Image) {
-        let t = &scene.textures[id].texture;
+        let Some(gt) = scene.textures.get(id) else { return };
+        // (a picture larger than the chip takes went up halved, see `fit_image`; one larger
+        // than its texture is not written - a device error each frame)
+        let fitted = fit_image(img, self.device.limits().max_texture_dimension_2d);
+        let img = fitted.as_ref().unwrap_or(img);
+        if img.width > gt.size.0 || img.height > gt.size.1 || img.rgba.len() < (img.width * img.height * 4) as usize {
+            return;
+        }
+        let t = &gt.texture;
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: t,
@@ -4580,6 +4714,8 @@ impl Renderer {
         let Some(old) = scene.textures.get(id) else {
             return false;
         };
+        let fitted = fit_image(img, self.device.limits().max_texture_dimension_2d);
+        let img = fitted.as_ref().unwrap_or(img);
         let levels = (32 - img.width.max(img.height).leading_zeros()).max(1);
         if old.size != (img.width, img.height) || old.texture.mip_level_count() != levels {
             scene.textures[id] = self.upload_texture_gpu_mips(img);
@@ -5166,22 +5302,25 @@ impl Renderer {
         id
     }
 
-    /// Point the scene's rain films at picture `key` (after a window frame: its bundles
-    /// are recorded, the next frame's read the new bind groups).
-    fn show_glass_behind(&self, scene: &mut Scene, key: GlassKey) {
+    /// Refraction reads a copy made before drawing films, avoiding rain/wiper feedback.
+    fn prepare_glass_behind(&mut self, scene: &mut Scene, width: u32, height: u32, format: wgpu::TextureFormat) {
         let Some(id) = scene.glass_slot else { return };
-        if scene.glass_key == Some(key) {
-            return;
+        if self.glass_picture.as_ref().is_none_or(|v| v.texture().width() != width || v.texture().height() != height || v.texture().format() != format) {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("picture behind glass"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1,
+                dimension: wgpu::TextureDimension::D2, format,
+                usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            self.glass_picture = Some(tex.create_view(&Default::default()));
         }
-        let view = if key.0 {
-            self.hdr_targets.get(&(key.1, key.2)).and_then(|h| h.down.first()).cloned()
-        } else {
-            self.glass_prev.as_ref().filter(|g| g.1 == (key.1, key.2)).map(|g| g.0.clone())
-        };
-        let Some(view) = view else { return };
-        scene.textures[id] = GpuTexture::showing(self.black_texture.texture.clone(), view, (key.1, key.2));
-        self.rebind_textures(scene, &[id]);
-        scene.glass_key = Some(key);
+        let view = self.glass_picture.as_ref().unwrap();
+        if scene.textures[id].view != *view {
+            scene.textures[id] = GpuTexture::showing(view.texture().clone(), view.clone(), (width, height));
+            self.rebind_textures(scene, &[id]);
+        }
     }
 
     /// The bind group of a material: its textures (or the plain white/black ones), its
@@ -6027,7 +6166,7 @@ impl Renderer {
             let usage = if samples > 1 {
                 wgpu::TextureUsages::RENDER_ATTACHMENT
             } else {
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC
             };
             self.device
                 .create_texture(&wgpu::TextureDescriptor {
@@ -6116,6 +6255,7 @@ impl Renderer {
         ];
         // (FXAA reads the screen mask as its `t_base` and leaves the screens as they are)
         let fxaa_bg = bg(&ldr, &mask, none);
+        let classic_bg = self.picture_group(&view);
         self.hdr_targets.insert(
             (w, h),
             HdrTargets {
@@ -6131,6 +6271,7 @@ impl Renderer {
                 meter_bg,
                 tonemap_bg,
                 fxaa_bg,
+                classic_bg,
                 puddles: None,
             },
         );
@@ -6444,8 +6585,8 @@ impl Renderer {
                 && scene.cpu_models.len() == scene.uploaded_entries as usize
             {
                 if !mb.is_empty() {
-                    self.queue.write_buffer(buf, mo, mb);
-                    self.queue.write_buffer(pbuf, po, pb);
+                    buf.write(&self.queue, mo, mb);
+                    pbuf.write(&self.queue, po, pb);
                 }
                 scene.cpu_models.extend_from_slice(&mats);
                 scene.cpu_params.extend_from_slice(&params);
@@ -6506,8 +6647,8 @@ impl Renderer {
                         let (mo, po) = (start as u64 * 64, start as u64 * 32);
                         if mo + mb.len() as u64 <= buf.size() && po + pb.len() as u64 <= pbuf.size()
                         {
-                            self.queue.write_buffer(buf, mo, mb);
-                            self.queue.write_buffer(pbuf, po, pb);
+                            buf.write(&self.queue, mo, mb);
+                            pbuf.write(&self.queue, po, pb);
                         }
                     }
                 }
@@ -6546,9 +6687,9 @@ impl Renderer {
             &scene.params_buf,
             &scene.camera_bind_group,
         ) {
-            if buf.size() as usize >= bytes.len() && pbuf.size() as usize >= pbytes.len() {
-                self.queue.write_buffer(buf, 0, bytes);
-                self.queue.write_buffer(pbuf, 0, pbytes);
+            if buf.size() >= bytes.len() as u64 && pbuf.size() >= pbytes.len() as u64 {
+                buf.write(&self.queue, 0, bytes);
+                pbuf.write(&self.queue, 0, pbytes);
                 scene.dirty = false;
                 return;
             }
@@ -6556,20 +6697,10 @@ impl Renderer {
         // a third more room than needed, so that the cars and people spawned over the
         // next minutes are appended instead of forcing a rebuild each time
         let cap = |n: usize| (((n as f64 * 1.35) as u64 + 65536).max(256)).div_ceil(256) * 256;
-        let model_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("models"),
-            size: cap(bytes.len()),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let params_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("params"),
-            size: cap(pbytes.len()),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        self.queue.write_buffer(&model_buf, 0, bytes);
-        self.queue.write_buffer(&params_buf, 0, pbytes);
+        let model_buf = GpuArray::new(&self.device, "models", cap(bytes.len()), 16, true);
+        let params_buf = GpuArray::new(&self.device, "params", cap(pbytes.len()), 16, true);
+        model_buf.write(&self.queue, 0, bytes);
+        params_buf.write(&self.queue, 0, pbytes);
         scene.model_buf = Some(model_buf);
         scene.params_buf = Some(params_buf);
         self.rebuild_camera_bind_group(scene);
@@ -6586,29 +6717,18 @@ impl Renderer {
         ) else {
             return;
         };
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("camera"),
-            layout: &self.camera_layout,
-            entries: &[
+        let mut entries = vec![
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: self.camera_buf.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: model_buf.as_entire_binding(),
+                    resource: model_buf.binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: params_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: light_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: grid_buf.as_entire_binding(),
+                    resource: params_buf.binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
@@ -6637,7 +6757,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: draw_buf.as_entire_binding(),
+                    resource: draw_buf.binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
@@ -6671,7 +6791,16 @@ impl Renderer {
                     binding: 19,
                     resource: self.lm_uniform.as_entire_binding(),
                 },
-            ],
+        ];
+        // (the point lights where the device has storage buffers for them)
+        if array_path() != ArrayPath::NoStorage {
+            entries.push(wgpu::BindGroupEntry { binding: 3, resource: light_buf.binding() });
+            entries.push(wgpu::BindGroupEntry { binding: 4, resource: grid_buf.binding() });
+        }
+        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera"),
+            layout: &self.camera_layout,
+            entries: &entries,
         });
         scene.camera_bind_group = Some(bg);
         let sbg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -6684,15 +6813,15 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: model_buf.as_entire_binding(),
+                    resource: model_buf.binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: params_buf.as_entire_binding(),
+                    resource: params_buf.binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
-                    resource: draw_buf.as_entire_binding(),
+                    resource: draw_buf.binding(),
                 },
             ],
         });
@@ -6764,20 +6893,15 @@ impl Renderer {
         let gbytes: &[u8] = bytemuck::cast_slice(&grid);
         let mut rebuilt = false;
         match &scene.light_buf {
-            Some(b) if b.size() as usize >= lbytes.len() => {
+            Some(b) if b.size() >= lbytes.len() as u64 => {
                 if scene.last_lights != lbytes {
-                    self.queue.write_buffer(b, 0, lbytes);
+                    b.write(&self.queue, 0, lbytes);
                 }
             }
             _ => {
                 let cap = (lbytes.len() * 2).max(64 * std::mem::size_of::<GpuPointLight>());
-                let b = self.device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("lights"),
-                    size: cap as u64,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                });
-                self.queue.write_buffer(&b, 0, lbytes);
+                let b = GpuArray::new(&self.device, "lights", cap as u64, 16, false);
+                b.write(&self.queue, 0, lbytes);
                 scene.light_buf = Some(b);
                 rebuilt = true;
             }
@@ -6785,11 +6909,13 @@ impl Renderer {
         match &scene.grid_buf {
             Some(b) => {
                 if scene.last_grid != grid {
-                    self.queue.write_buffer(b, 0, gbytes);
+                    b.write(&self.queue, 0, gbytes);
                 }
             }
             None => {
-                scene.grid_buf = Some(buffer_init(&self.device, &self.queue, Some("light grid"), gbytes, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST));
+                let b = GpuArray::new(&self.device, "light grid", gbytes.len() as u64, 4, false);
+                b.write(&self.queue, 0, gbytes);
+                scene.grid_buf = Some(b);
                 rebuilt = true;
             }
         }
@@ -6915,18 +7041,13 @@ impl Renderer {
             .unwrap_or(false);
         if !fits {
             let cap = (bytes.len() as u64 * 3 / 2).max(1 << 16).div_ceil(4) * 4;
-            scene.draw_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("draw list"),
-                size: cap,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
+            scene.draw_buf = Some(GpuArray::new(&self.device, "draw list", cap, 4, true));
             self.rebuild_camera_bind_group(scene);
         } else if scene.camera_bind_group.is_none() || scene.shadow_bind_group.is_none() {
             self.rebuild_camera_bind_group(scene);
         }
         if let Some(b) = &scene.draw_buf {
-            self.queue.write_buffer(b, 0, bytes);
+            b.write(&self.queue, 0, bytes);
         }
     }
 
@@ -7385,17 +7506,13 @@ impl Renderer {
             && self.options.msaa <= 1
             && !(lighting.enhanced && self.hdr_pass.is_some() && omsi_cfg::env::var_os("OMSI_NO_ENHANCED").is_none())
             && omsi_cfg::env::var_os("OMSI_NO_FXAA").is_none();
-        // The rain on the glass shows last frame's picture through its drops: the Enhanced
-        // path keeps it anyway (its glow's first level), the plain graphics draw into a
-        // texture while it rains and keep a copy at half the size (see `glass_prev`).
+        // Rain films are drawn after copying the clean current-frame scene. Classic
+        // graphics need a sampleable scene target too, even without puddles or scaling.
         let enhanced_view = lighting.enhanced && self.hdr_pass.is_some() && omsi_cfg::env::var_os("OMSI_NO_ENHANCED").is_none();
         let glass_on = with_overlays
             && scene.glass_slot.is_some()
             && (lighting.rain > 0.001 || lighting.wetness > 0.02)
             && omsi_cfg::env::var_os("OMSI_NO_GLASS_PICTURE").is_none();
-        let glass_key: Option<GlassKey> = glass_on.then_some((enhanced_view, width, height));
-        // (what the films may read this frame: the picture the last window frame left)
-        let glass_ok = with_overlays && self.glass_live.take().is_some_and(|k| Some(k) == scene.glass_key && Some(k) == glass_key);
         let scaled = (width, height) != (full_w, full_h) || vanilla_fxaa || (glass_on && !enhanced_view);
         let scene_target: Option<(wgpu::TextureView, wgpu::BindGroup)> = if scaled {
             Some(self.scale_target(width, height))
@@ -7419,6 +7536,17 @@ impl Renderer {
         // the mirrors are drawn by the same path as the window (their picture graded with
         // the window's exposure, see the post passes)
         let enhanced = enhanced_frame;
+        // Rain reflections belong to all graphics modes. Classic shading uses the same
+        // scene/mask targets, then presents their linear colour without Enhanced grading.
+        let puddles_wanted = with_overlays
+            && self.puddles.is_some()
+            && self.options.reflections
+            && lighting.wetness * (1.0 - lighting.snow.clamp(0.0, 1.0)) > 0.05
+            && scene.materials.iter().any(|m| m.uniform.params2[2] > 0.0)
+            && debug_view() == 0.0
+            && omsi_cfg::env::var_os("OMSI_NO_PUDDLE_REFLECTIONS").is_none();
+        let reflection_frame = !enhanced && puddles_wanted && self.reflection_pass.is_some();
+        let masked_frame = enhanced || reflection_frame;
         let grid = self.prepare_lights(scene, cam_rel, enhanced_frame);
         self.prepare_coronas(scene, lighting.night, lighting.inside.as_ref().filter(|v| point_in_vehicle_box(camera.position, v)));
         self.prepare_smoke(scene, camera.position);
@@ -7426,15 +7554,18 @@ impl Renderer {
         let ao_on = with_overlays && self.options.ssao && self.ssao_pipeline.is_some() && omsi_cfg::env::var_os("OMSI_NO_AO").is_none();
         // the enhanced path's shading is costly: the depth prepass keeps it to the visible
         // surface (without multisampling, see `share_depth`)
-        let prepass_on = ao_on || (enhanced && (with_overlays || xr_view));
+        let prepass_on = ao_on || puddles_wanted || glass_on || (enhanced && (with_overlays || xr_view));
         if prepass_on && self.ensure_ao(width, height) {
             // a new AO texture: the camera bind group must point at it
             scene.dirty = true;
             scene.model_buf = None;
             self.hdr_targets.clear();
         }
-        if enhanced {
+        if masked_frame {
             self.hdr_targets(width, height);
+        }
+        if glass_on {
+            self.prepare_glass_behind(scene, width, height, if masked_frame { HDR_FORMAT } else { self.format });
         }
         let dt = {
             let now = std::time::Instant::now();
@@ -7710,9 +7841,9 @@ impl Renderer {
             flags: [
                 if lighting.detail { 1.0 } else { 0.0 },
                 if enhanced { 1.0 } else { 0.0 },
-                // (below zero: the rain films have last frame's picture to look through,
+                // (below zero: the rain films have the clean current picture to look through,
                 // see `rain_behind`; above zero is an old branch never taken)
-                if glass_ok { -1.0 } else { 0.0 },
+                if glass_on { -1.0 } else { 0.0 },
                 if shadows { SHADOW_RANGE_CLOSE } else { 0.0 },
             ],
             light_view_proj_close: light_view_proj_close.to_cols_array_2d(),
@@ -7725,12 +7856,6 @@ impl Renderer {
         let probe_redraw = enhanced
             && (lead_view || self.sky_state.is_none())
             && self.prepare_enhanced(lighting, cam_rel, ro, dt);
-        let puddles_wanted = enhanced
-            && with_overlays
-            && self.options.reflections
-            && lighting.wetness * (1.0 - lighting.snow.clamp(0.0, 1.0)) > 0.05
-            && debug_view() == 0.0
-            && omsi_cfg::env::var_os("OMSI_NO_PUDDLE_REFLECTIONS").is_none();
         // --- what every pass draws, as batches over one draw list (see `Batch`): the shadow
         // casters of each cascade, the depth prepass and the main pass. The list is built
         // and uploaded before any pass is encoded.
@@ -8509,6 +8634,12 @@ impl Renderer {
             }
         }
         stage(self, "items", "mirror.items");
+        let mut rain_batches = Vec::new();
+        if glass_on {
+            let (rain, main): (Vec<_>, Vec<_>) = main_batches.into_iter().partition(|b| scene.materials[b.material as usize].uniform.emissive[3] > 1.5);
+            rain_batches = rain;
+            main_batches = main;
+        }
         self.upload_draw_list(scene, &list);
         stage(self, "upload", "mirror.upload");
         // OMSI_NO_BUNDLES=1 records the main pass directly, for comparison. (Splitting the
@@ -8516,11 +8647,8 @@ impl Renderer {
         // has to load the first one's targets back into the GPU's tile memory, which cost
         // more GPU time than it saved on the CPU.)
         let main_bundles = if omsi_cfg::env::var_os("OMSI_NO_BUNDLES").is_none() {
-            let (pp, format) = if enhanced {
-                (self.hdr_pass.as_ref().expect("enhanced pipelines"), wgpu::TextureFormat::Rgba16Float)
-            } else {
-                (&self.pass, self.format)
-            };
+            let pp = self.main_pass(enhanced, reflection_frame);
+            let format = if masked_frame { HDR_FORMAT } else { self.format };
             record_bundles(
                 &self.device,
                 self.encoding_pool.as_ref(),
@@ -8789,7 +8917,8 @@ impl Renderer {
         // A presurface must colour its below-ground faces before its invisible cover
         // seals them. Reusing prepass depth would reject those faces (or let terrain
         // reject them first). The prepass still supplies AO; colour rebuilds its depth.
-        let share_depth = prepass_on && single && self.ao.is_some() && !has_presurface;
+        // A depth-writing window in the colour pass must not replace the road receiver.
+        let share_depth = prepass_on && single && self.ao.is_some() && !has_presurface && !puddles_wanted;
         let targets = if share_depth {
             None
         } else {
@@ -8855,14 +8984,14 @@ impl Renderer {
             // (unscaled - multiplying it by the enhanced exposure blew a night sky's dim clear
             // colour out to white instead) keeps a real gap from ever reading as a rendering
             // bug of its own.
-            let sky = lighting.sky_color;
+            let sky = if lighting.classic && !enhanced { lighting.sky_color.map(|v| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }) } else { lighting.sky_color };
             let msaa_color = targets.as_ref().map(|t| &t.0);
             let depth_view: &wgpu::TextureView = match &targets {
                 Some(t) => &t.1,
                 None => &self.ao.as_ref().unwrap().depth_view,
             };
             // the enhanced path draws into a high-range picture the post pass then grades
-            let hdr = if enhanced {
+            let hdr = if masked_frame {
                 self.hdr_targets.get(&(width, height))
             } else {
                 None
@@ -8881,7 +9010,7 @@ impl Renderer {
                         }
                     }
                 };
-            let pp = if enhanced { self.hdr_pass.as_ref().expect("enhanced pipelines") } else { &self.pass };
+            let pp = self.main_pass(enhanced, reflection_frame);
             // the enhanced pass's screen mask beside the picture (see `MASK_FORMAT`)
             let mask_attachment = hdr.map(|h| wgpu::RenderPassColorAttachment {
                 view: h.mask_msaa.as_ref().unwrap_or(&h.mask),
@@ -9034,7 +9163,7 @@ impl Renderer {
             }
             // HUD overlays (on the vanilla path at full size; the enhanced path draws them
             // after grading, a scaled picture after scaling it up)
-            if !overlays.is_empty() && !enhanced && !scaled {
+            if !overlays.is_empty() && !masked_frame && !scaled {
                 pass.set_pipeline(&self.overlay_pipeline);
                 for (k, _) in overlays.iter().enumerate() {
                     if let Some((_, _, bg, _)) = scene.overlay_res.get(k) {
@@ -9059,6 +9188,64 @@ impl Renderer {
                 &all
             };
             self.encode_puddle_reflections(&mut encoder, width, height, scene, batches, &list, lighting, camera, tset.as_ref(), &mut timed);
+        }
+        if glass_on {
+            let hdr = masked_frame.then(|| &self.hdr_targets[&(width, height)]);
+            let view = hdr.map_or(scene_view, |h| h.puddles.as_ref().filter(|_| puddles_on).map_or(&h.view, |p| &p.view));
+            let behind = self.glass_picture.as_ref().unwrap();
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo { texture: view.texture(), mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo { texture: behind.texture(), mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            let colours = [
+                Some(wgpu::RenderPassColorAttachment {
+                    view, depth_slice: None, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                }),
+                hdr.map(|h| wgpu::RenderPassColorAttachment {
+                    view: &h.mask, depth_slice: None, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                }),
+            ];
+            let pipes = &self.main_pass(enhanced, reflection_frame).rain_pipelines;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("rain on current scene"),
+                color_attachments: &colours[..if hdr.is_some() { 2 } else { 1 }],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.ao.as_ref().unwrap().depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+            });
+            pass.set_bind_group(0, scene.camera_bind_group.as_ref().unwrap(), &[]);
+            encode_batches(&mut pass, scene, &rain_batches, |pipe| &pipes[pipe as usize]);
+        }
+        if reflection_frame {
+            let h = &self.hdr_targets[&(width, height)];
+            let bg = h.puddles.as_ref().filter(|_| puddles_on).map_or(&h.classic_bg, |p| &p.classic_bg);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("classic reflections present"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: scene_view, depth_slice: None, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None, timestamp_writes: None,
+                occlusion_query_set: None, multiview_mask: None,
+            });
+            pass.set_pipeline(&self.copy_pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            pass.draw(0..3, 0..1);
+            if !overlays.is_empty() && !scaled {
+                pass.set_pipeline(&self.overlay_pipeline_1x);
+                for (k, _) in overlays.iter().enumerate() {
+                    if let Some((_, _, bg, _)) = scene.overlay_res.get(k) {
+                        pass.set_bind_group(0, bg, &[]);
+                        pass.draw(0..6, 0..1);
+                    }
+                }
+            }
         }
         if enhanced {
             // --- the post passes: glow, metering and adaptation, tone curve, FXAA
@@ -9215,39 +9402,6 @@ impl Renderer {
                 0,
                 bytemuck::cast_slice(&[width as f32, height as f32, sharpen.clamp(0.0, 0.8), if vanilla_fxaa { 1.0 } else { 0.0 }]),
             );
-            // the picture at half its size for the rain on the glass next frame
-            if glass_key.is_some_and(|k| !k.0) {
-                if self.glass_prev.as_ref().map(|g| g.1) != Some((width, height)) {
-                    let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-                        label: Some("picture behind the glass"),
-                        size: wgpu::Extent3d { width: (width / 2).max(1), height: (height / 2).max(1), depth_or_array_layers: 1 },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: self.format,
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                        view_formats: &[],
-                    });
-                    self.glass_prev = Some((tex.create_view(&Default::default()), (width, height)));
-                }
-                let view = &self.glass_prev.as_ref().unwrap().0;
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("picture behind the glass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                pass.set_pipeline(&self.upscale_pipeline);
-                pass.set_bind_group(0, bg, &[]);
-                pass.draw(0..3, 0..1);
-            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("upscale"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -9276,10 +9430,6 @@ impl Renderer {
                     }
                 }
             }
-        }
-        if let Some(k) = glass_key {
-            self.glass_live = Some(k);
-            self.show_glass_behind(scene, k);
         }
         stage(self, "encode", "mirror.encode");
         // Turning the recorded passes into Metal commands is the costliest CPU step of a
@@ -9404,7 +9554,23 @@ impl Renderer {
         self.instant_exposure = true;
         self.render(scene, &view, width, height, camera, lighting);
         self.instant_exposure = false;
-        let bpr = (width * 4).div_ceil(256) * 256;
+        let mut out = self.read_texture(&tex, wgpu::TextureAspect::All)?;
+        // BGRA surfaces → swap
+        if matches!(
+            self.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        ) {
+            for px in out.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+        }
+        Ok(out)
+    }
+
+    fn read_texture(&self, texture: &wgpu::Texture, aspect: wgpu::TextureAspect) -> Result<Vec<u8>> {
+        let (width, height) = (texture.width(), texture.height());
+        let row_bytes = width * texture.format().block_copy_size(Some(aspect)).context("unsupported readback format")?;
+        let bpr = row_bytes.div_ceil(256) * 256;
         let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
             size: (bpr * height) as u64,
@@ -9414,10 +9580,10 @@ impl Renderer {
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &tex,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
+                aspect,
             },
             wgpu::TexelCopyBufferInfo {
                 buffer: &buf,
@@ -9444,22 +9610,13 @@ impl Renderer {
             .context("map")?
             .map_err(|e| anyhow!("map: {e:?}"))?;
         let data = slice.get_mapped_range();
-        let mut out = Vec::with_capacity((width * height * 4) as usize);
+        let mut out = Vec::with_capacity((row_bytes * height) as usize);
         for row in 0..height {
             let start = (row * bpr) as usize;
-            out.extend_from_slice(&data[start..start + (width * 4) as usize]);
+            out.extend_from_slice(&data[start..start + row_bytes as usize]);
         }
         drop(data);
         buf.unmap();
-        // BGRA surfaces → swap
-        if matches!(
-            self.format,
-            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-        ) {
-            for px in out.chunks_exact_mut(4) {
-                px.swap(0, 2);
-            }
-        }
         Ok(out)
     }
 }
@@ -9833,7 +9990,86 @@ fn sky_input_differs(a: &atmosphere::SkyInput, b: &atmosphere::SkyInput) -> bool
 /// is what `s_tile`'s clamp to edge gives; reading `t_trans`/`t_night` through both
 /// samplers fails the whole module ("Conflicting samplers").
 fn scene_shader_source(gl: bool) -> String {
+    arrays_as_textures(&scene_shader_text(gl), array_path())
+}
+
+/// The scene module with its arrays read as `path` has them (see `ArrayPath`): each
+/// storage array the device cannot read becomes a texture and its `name[i]` a function
+/// that loads texel `i`; without storage at all the point lights are none.
+fn arrays_as_textures(src: &str, path: ArrayPath) -> String {
+    if path == ArrayPath::Storage {
+        return src.to_string();
+    }
+    let w = ARRAY_TEX_WIDTH;
+    let mut out = src.to_string();
+    let mut swap = |decl: &str, with: String, name: &str, call: &str| {
+        assert!(out.contains(decl), "scene shader: {decl} not found");
+        out = out.replace(decl, &with);
+        out = indexing_as_calls(&out, name, call);
+    };
+    let load = |name: &str, ty: &str, pick: &str| {
+        format!(
+            "var {name}_tex: texture_2d<{ty}>;\nfn {name}_at(i: u32) -> {} {{ return textureLoad({name}_tex, vec2<u32>(i % {w}u, i / {w}u), 0){pick}; }}",
+            if pick.is_empty() { format!("vec4<{ty}>") } else { ty.to_string() }
+        )
+    };
+    swap("var<storage, read> models: array<vec4<f32>>;", load("models", "f32", ""), "models", "models_at");
+    swap("var<storage, read> inst_params: array<vec4<f32>>;", load("inst_params", "f32", ""), "inst_params", "inst_params_at");
+    swap("var<storage, read> draw_list: array<u32>;", load("draw_list", "u32", ".x"), "draw_list", "draw_list_at");
+    if path == ArrayPath::NoStorage {
+        swap(
+            "@group(0) @binding(3) var<storage, read> lights: array<PointLight>;",
+            "fn lights_at(i: u32) -> PointLight { return PointLight(vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0), vec4<f32>(0.0)); }".to_string(),
+            "lights",
+            "lights_at",
+        );
+        swap("@group(0) @binding(4) var<storage, read> grid: array<u32>;", "fn grid_at(i: u32) -> u32 { return 0xffffffffu; }".to_string(), "grid", "grid_at");
+    }
+    out
+}
+
+/// `name[expr]` (the whole word `name`) turned into `call(expr)`.
+fn indexing_as_calls(src: &str, name: &str, call: &str) -> String {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let pat = format!("{name}[");
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(at) = rest.find(&pat) {
+        let before = rest[..at].chars().next_back();
+        out.push_str(&rest[..at]);
+        if before.is_some_and(word) {
+            out.push_str(&pat);
+            rest = &rest[at + pat.len()..];
+            continue;
+        }
+        // the matching bracket
+        let inner = &rest[at + pat.len()..];
+        let mut depth = 1;
+        let end = inner
+            .char_indices()
+            .find(|&(_, c)| {
+                depth += match c {
+                    '[' => 1,
+                    ']' => -1,
+                    _ => 0,
+                };
+                depth == 0
+            })
+            .map(|(i, _)| i)
+            .expect("unbalanced brackets in the scene shader");
+        out.push_str(call);
+        out.push('(');
+        out.push_str(&indexing_as_calls(&inner[..end], name, call));
+        out.push(')');
+        rest = &inner[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn scene_shader_text(gl: bool) -> String {
     let src = [
+        include_str!("colour.wgsl"),
         include_str!("shader.wgsl"),
         include_str!("enhanced_common.wgsl"),
         include_str!("puddle_common.wgsl"),
@@ -9908,6 +10144,7 @@ fn cloud_noise_textures(device: &wgpu::Device, queue: &wgpu::Queue) -> (wgpu::Te
 /// The sky dome (both paths) and the enhanced reflection probe.
 fn sky_shader_source() -> String {
     [
+        include_str!("colour.wgsl"),
         include_str!("sky.wgsl"),
         include_str!("enhanced_common.wgsl"),
         include_str!("sky_enhanced.wgsl"),
@@ -9924,7 +10161,7 @@ fn corona_shader_source() -> String {
     .join("\n")
 }
 
-/// One full-screen post pass of the enhanced path.
+/// One single-sampled full-screen pass.
 fn post_pass(
     encoder: &mut wgpu::CommandEncoder,
     view: &wgpu::TextureView,
@@ -11811,6 +12048,64 @@ mod tests {
         }
     }
 
+    /// Where the device cannot read storage buffers in a vertex shader, or none at all, the
+    /// scene module reads its arrays from textures: it validates and translates to the GLSL
+    /// of such chips (GLES 3.1 / GL 4.3 with storage for the lights, GLES 3.0 / GL 3.3
+    /// without), and nothing of it is a storage buffer where it must not be (#770, #316).
+    #[test]
+    fn the_scene_shader_reads_its_arrays_from_textures_without_vertex_storage() {
+        use wgpu::naga;
+        use wgpu::naga::back::glsl;
+        for (path, versions) in [
+            (ArrayPath::VertexTextures, [glsl::Version::Embedded { version: 310, is_webgl: false }, glsl::Version::Desktop(430)]),
+            (ArrayPath::NoStorage, [glsl::Version::Embedded { version: 300, is_webgl: false }, glsl::Version::Desktop(330)]),
+        ] {
+            let src = arrays_as_textures(&scene_shader_text(true), path);
+            assert!(!src.contains("models[") && !src.contains("inst_params[") && !src.contains("draw_list["));
+            assert_eq!(src.contains("var<storage"), path == ArrayPath::VertexTextures, "{path:?}");
+            let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{path:?}: {}", e.emit_to_string(&src)));
+            let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{path:?}: {e:?}"));
+            let (module, info) =
+                naga::back::pipeline_constants::process_overrides(&module, &info, None, &Default::default()).expect("overrides");
+            for version in versions {
+                let options = glsl::Options { version, ..Default::default() };
+                for entry in &module.entry_points {
+                    let pipeline = glsl::PipelineOptions { shader_stage: entry.stage, entry_point: entry.name.clone(), multiview: None };
+                    let mut out = String::new();
+                    glsl::Writer::new(&mut out, &module, &info, &options, &pipeline, Default::default())
+                        .and_then(|mut w| w.write())
+                        .unwrap_or_else(|e| panic!("{path:?} {version:?} {}: {e:?}", entry.name));
+                    let vertex = entry.stage == naga::ShaderStage::Vertex;
+                    if vertex || path == ArrayPath::NoStorage {
+                        assert!(!out.contains(" buffer "), "{path:?} {version:?} {}: a storage block", entry.name);
+                    }
+                }
+            }
+        }
+        // the rewrite leaves names that only end alike alone, and nests
+        assert_eq!(indexing_as_calls("a = my_models[1]; b = models[models[i + 1u] .x];", "models", "f"), "a = my_models[1]; b = f(f(i + 1u) .x);");
+    }
+
+    /// An array texture is written in the rest of a row, whole rows and the start of the
+    /// last row, and never past its end.
+    #[test]
+    fn array_texture_writes_cover_the_range_once() {
+        let w = ARRAY_TEX_WIDTH;
+        assert_eq!(array_tex_spans(0, 10, 4 * w as u64), vec![(0, 0, 10, 1)]);
+        assert_eq!(array_tex_spans(w as u64 - 2, 5, 4 * w as u64), vec![(w - 2, 0, 2, 1), (0, 1, 3, 1)]);
+        assert_eq!(array_tex_spans(5, 3 * w as u64, 4 * w as u64), vec![(5, 0, w - 5, 1), (0, 1, w, 2), (0, 3, 5, 1)]);
+        assert_eq!(array_tex_spans(0, 2 * w as u64, 4 * w as u64), vec![(0, 0, w, 2)]);
+        // past the end: cut
+        assert_eq!(array_tex_spans(2 * w as u64 - 1, 10, 2 * w as u64), vec![(w - 1, 1, 1, 1)]);
+        assert!(array_tex_spans(3 * w as u64, 10, 2 * w as u64).is_empty());
+        for (at, n) in [(0u64, 1u64), (7, 9000), (2047, 2049), (4096, 4096)] {
+            let covered: u64 = array_tex_spans(at, n, 64 * w as u64).iter().map(|s| s.2 as u64 * s.3 as u64).sum();
+            assert_eq!(covered, n);
+        }
+    }
+
     #[test]
     fn the_sky_is_recomputed_only_when_it_has_moved_on() {
         let a = atmosphere::SkyInput::default();
@@ -11997,6 +12292,34 @@ pub fn fit_texture(data: &omsi_texture::TextureData, max: u32) -> Option<omsi_te
     Some(omsi_texture::TextureData { width: cw, height: ch, format: PixelFormat::Rgba8, levels: vec![rgba], has_alpha: data.has_alpha, gpu_mips: true })
 }
 
+/// A size halved (both sides, as `fit_texture` halves a picture) until neither passes `max`.
+fn fit_size(w: u32, h: u32, max: u32) -> (u32, u32) {
+    let (mut w, mut h) = (w, h);
+    while w > max || h > max {
+        (w, h) = ((w / 2).max(1), (h / 2).max(1));
+    }
+    (w, h)
+}
+
+/// An RGBA picture of the game's own (a script's or a sign's text, an HTML display) larger
+/// than the graphics chip takes, halved until it fits (None when it fits as it is). Made at
+/// its full size, the texture was a device error, and so was every frame's write into it.
+fn fit_image(img: &omsi_texture::Image, max: u32) -> Option<omsi_texture::Image> {
+    if img.width <= max && img.height <= max {
+        return None;
+    }
+    let data = omsi_texture::TextureData {
+        width: img.width,
+        height: img.height,
+        format: omsi_texture::PixelFormat::Rgba8,
+        levels: vec![img.rgba.clone()],
+        has_alpha: img.has_alpha,
+        gpu_mips: true,
+    };
+    let small = fit_texture(&data, max)?;
+    Some(omsi_texture::Image { width: small.width, height: small.height, rgba: small.levels.into_iter().next().unwrap_or_default(), has_alpha: img.has_alpha })
+}
+
 #[cfg(test)]
 mod fit_tests {
     #[test]
@@ -12006,6 +12329,14 @@ mod fit_tests {
         assert_eq!((small.width, small.height), (2, 1));
         assert_eq!(small.levels[0].len(), 2 * 4);
         assert!(super::fit_texture(&data, 8).is_none());
+        // a picture of the game's own, and a size, the same way
+        let img = omsi_texture::Image { width: 5000, height: 300, rgba: vec![9; 5000 * 300 * 4], has_alpha: true };
+        let small = super::fit_image(&img, 2048).unwrap();
+        assert_eq!((small.width, small.height), (1250, 75));
+        assert_eq!(small.rgba.len(), 1250 * 75 * 4);
+        assert_eq!(super::fit_size(5000, 300, 2048), (1250, 75));
+        assert_eq!(super::fit_size(2048, 16, 2048), (2048, 16));
+        assert!(super::fit_image(&small, 2048).is_none());
     }
 }
 

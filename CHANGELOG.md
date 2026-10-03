@@ -4,6 +4,94 @@ Every push to `main` is released as `MAJOR.MINOR.COMMIT` (see
 [docs/VERSIONING.md](docs/VERSIONING.md)); the downloads are on the
 [Releases](https://github.com/openOMSI-Project/openOMSI/releases) page.
 
+## 0.1.1234 - 2026-10-03
+
+### Launcher
+- The Drive page is laid out again, in three steps - the bus, the day and the weather, the map
+  and the duty. The column on the left is a solid panel; the bus or the map has a stage of its
+  own on the right, the roadbook beside the map, and a foot under it sums the choice up with
+  the buttons in a row. Nothing lies over the map or shows through a panel any more, the line
+  and tour rows have room for their text, stop names keep off each other and inside the map,
+  the lists stretch with the window, and the roadbook opens on your first trip.
+
+### Graphics and devices
+- OpenGL chips without storage buffers in the vertex shader (Intel HD 2500, Mali on GLES) draw
+  the scene from textures instead of failing to start (`OMSI_GPU_ARRAYS=textures` forces it). [#770](https://github.com/openOMSI-Project/openOMSI/issues/770) [#316](https://github.com/openOMSI-Project/openOMSI/issues/316)
+- The Vulkan and OpenGL interfaces are only started when DirectX 12 cannot draw, so their
+  loader no longer breaks a DirectX 12 start on dual-GPU laptops. [#1058](https://github.com/openOMSI-Project/openOMSI/issues/1058) [#1044](https://github.com/openOMSI-Project/openOMSI/issues/1044)
+- A chip without a DirectX 12 driver draws on its own Vulkan or OpenGL instead of Microsoft's
+  software renderer. [#770](https://github.com/openOMSI-Project/openOMSI/issues/770)
+- Script, text and HTML textures larger than the chip takes are halved until they fit.
+- A window the system cannot open ends with a message instead of a panic report.
+- A script value that is not a number no longer turns the bus to NaN and stops the game. [#1045](https://github.com/openOMSI-Project/openOMSI/issues/1045)
+
+## 0.1.1223 - 2026-10-03
+
+### Driving and controls
+- The cab's steering wheel turns as far left as right: `Axle_Steering_N_L` and `_R` carry the
+  axle's one angle, as Omsi.exe hands it to the scripts, not each tyre's Ackermann angle. [#953](https://github.com/openOMSI-Project/openOMSI/issues/953) [#1073](https://github.com/openOMSI-Project/openOMSI/issues/1073)
+- A steering or pedal key let go while Shift is held, or while the game menu is open, lets go
+  instead of turning the wheel on to full lock. [#1040](https://github.com/openOMSI-Project/openOMSI/issues/1040) [#1050](https://github.com/openOMSI-Project/openOMSI/issues/1050) [#1053](https://github.com/openOMSI-Project/openOMSI/issues/1053)
+- Mouse steering switched off in the game menu keeps the brake on, as the O key does. [#517](https://github.com/openOMSI-Project/openOMSI/issues/517) [#760](https://github.com/openOMSI-Project/openOMSI/issues/760)
+- Ctrl+click on the ground in the free view (F4) moves the bus to the nearest street there. [#1039](https://github.com/openOMSI-Project/openOMSI/issues/1039)
+- The engine-off hint names the player's own key for the electrics. [#461](https://github.com/openOMSI-Project/openOMSI/issues/461)
+
+### Timetable and passengers
+- An early timetable bus waits at its stop until 20 s before its departure (a train 2 min), as
+  in Omsi.exe, instead of leaving after 40 s. [#1012](https://github.com/openOMSI-Project/openOMSI/issues/1012)
+- A tour that repeats the same trip no longer leaves its bus at the trip's last stop for good. [#976](https://github.com/openOMSI-Project/openOMSI/issues/976)
+- Stops hung on another object (`[attachObj]`) are on the route map, and a duty's stop whose
+  tile was not loaded at the start is reached once it loads. [#1014](https://github.com/openOMSI-Project/openOMSI/issues/1014) [#975](https://github.com/openOMSI-Project/openOMSI/issues/975)
+- People leaving a bus walk onto the pavement at their own pace instead of sliding sideways. [#1033](https://github.com/openOMSI-Project/openOMSI/issues/1033) [#1079](https://github.com/openOMSI-Project/openOMSI/issues/1079)
+
+### AI traffic and maps
+- A map without `unsched_vehgroups.txt` takes its random traffic from the default AI group alone,
+  as Omsi.exe does. [#1025](https://github.com/openOMSI-Project/openOMSI/issues/1025)
+- AI cars whose road is drawn more than 0.3 m under their lane come down onto it instead of
+  driving in the air. [#876](https://github.com/openOMSI-Project/openOMSI/issues/876)
+- A signal that names no crossing is still a lamp, and reads phase 0 as in Omsi.exe. [#988](https://github.com/openOMSI-Project/openOMSI/issues/988)
+- A terrain object lying outside its own tile is not drawn, as in OMSI (leftovers of copied
+  tiles no longer stand in the road). [#787](https://github.com/openOMSI-Project/openOMSI/issues/787)
+
+### Graphics
+- Texture names stored in a Korean, Chinese or Japanese code page are found. [#990](https://github.com/openOMSI-Project/openOMSI/issues/990)
+- A `[rendertype] surface` object with `[matl_alpha] 2` on a texture without alpha is opaque, so
+  roads behind it no longer show through. [#1008](https://github.com/openOMSI-Project/openOMSI/issues/1008)
+- Enhanced: the custom weather's brightness no longer darkens the mirrors; a white light map no
+  longer bleaches displays and gauges at night. [#1018](https://github.com/openOMSI-Project/openOMSI/issues/1018) [#827](https://github.com/openOMSI-Project/openOMSI/issues/827)
+- Vanilla+: the sphere map is blended on encoded colours as in Vanilla and Omsi.exe, so
+  reflections are no longer twice too strong over dark surfaces. [#780](https://github.com/openOMSI-Project/openOMSI/issues/780)
+- A mesh borrowed from another vehicle pack keeps the winding of its own pack. [#977](https://github.com/openOMSI-Project/openOMSI/issues/977) [#1054](https://github.com/openOMSI-Project/openOMSI/issues/1054)
+
+### Menus and platforms
+- Scroll bars of the game menu's drop-downs and of a line's stop list can be dragged. [#794](https://github.com/openOMSI-Project/openOMSI/issues/794)
+- Names macOS stores decomposed (the weather "Eiseskälte") show their accented letters.
+- A bus whose `[boundingbox]` has a negative size no longer stops the game. [#986](https://github.com/openOMSI-Project/openOMSI/issues/986)
+- macOS: a fresh openOMSI.app in Applications keeps its content in `~/.openomsi/content` instead
+  of creating OMSI's folders among the applications; content already installed there stays. [#1043](https://github.com/openOMSI-Project/openOMSI/issues/1043)
+
+## 0.1.1196 - 2026-10-03
+
+### Roads and driving
+- Roads are drawn at their own height again and win over the ground by the surfaces' depth bias,
+  as in Omsi.exe; the 8 cm lift is gone, so footways no longer stand over the ground aligned to
+  them and markings no longer sink under the road. [#1077](https://github.com/openOMSI-Project/openOMSI/pull/1077)
+- The bumps of a road texture's `.surf` map (cobbles, slabs, broken asphalt) are felt under the
+  wheels, on splines and on junction objects alike (`OMSI_NO_SURF=1` for an A/B). [#1056](https://github.com/openOMSI-Project/openOMSI/pull/1056)
+- Train cars stand end to end by their model bodies, not by their declared coupling points
+  (a CR200J's second car no longer sits 2.6 m inside the first). [#1016](https://github.com/openOMSI-Project/openOMSI/pull/1016)
+
+### Graphics
+- Wet-road reflections work in Vanilla and Vanilla+ as well as Enhanced, also seen through the
+  bus's own windows; rain films no longer feed the previous frame back into themselves. [#970](https://github.com/openOMSI-Project/openOMSI/pull/970)
+- The texture fallback index looks into archives and content installed while the game runs. [#1029](https://github.com/openOMSI-Project/openOMSI/pull/1029)
+
+### Maps and launcher
+- On the navigator and city map, trolleybuses, buses and trams have their own colours and show
+  their line. [#992](https://github.com/openOMSI-Project/openOMSI/pull/992)
+- The Drive page shows the map itself: its roads, entry points and the chosen line's route. [#943](https://github.com/openOMSI-Project/openOMSI/pull/943)
+- A server whose map is not installed here can be joined: the map comes with the server's mods. [#1076](https://github.com/openOMSI-Project/openOMSI/pull/1076)
+
 ## 0.1.1166 - 2026-10-02
 
 ### Graphics
@@ -40,6 +128,35 @@ Every push to `main` is released as `MAJOR.MINOR.COMMIT` (see
   Interface size, and lists destination codes in a column.
 - The website has a light theme (and a theme button), readable colours, and no sideways
   scrolling on phones.
+
+## 0.1.1147 - 2026-10-02
+
+### Mirrors
+- In the cab, Ctrl+M can put copies of the bus's mirrors over the picture; Ctrl+Shift+M opens
+  an editor to move, resize, add, aim and zoom them. Layouts are saved per bus. [#920](https://github.com/openOMSI-Project/openOMSI/pull/920)
+
+### LAN and chat
+- After a LAN connection times out, the client keeps trying the host and can rejoin without
+  restarting the game; `/reconnect` retries immediately. [#926](https://github.com/openOMSI-Project/openOMSI/pull/926)
+- Long chat messages wrap onto following rows instead of being cut with an ellipsis. [#969](https://github.com/openOMSI-Project/openOMSI/pull/969)
+- A dedicated server behind a local web gateway logs the player's forwarded address, so the
+  operator can distinguish clients that would otherwise all appear as loopback. [#962](https://github.com/openOMSI-Project/openOMSI/pull/962)
+
+### Radio
+- A bus radio display can show the station and song that are actually playing. A map can supply
+  its own stations in `radio.cfg` and give them frequencies by position on the map. [#945](https://github.com/openOMSI-Project/openOMSI/pull/945)
+
+### Graphics and textures
+- In Enhanced, a soaked road has puddles in patches instead of becoming one mirror from kerb
+  to kerb. [#950](https://github.com/openOMSI-Project/openOMSI/pull/950)
+- A missing scenery or spline texture can be found from another folder of the same content
+  type when the installation contains a matching image. [#912](https://github.com/openOMSI-Project/openOMSI/pull/912)
+- In Vanilla+, terrain under street lamps keeps its ground colour instead of getting a white
+  or beige veil at night. [#935](https://github.com/openOMSI-Project/openOMSI/pull/935)
+
+### Routes and input
+- Route numbers with symbols, such as `-10`, are kept as written from a HOF or manual input
+  and work on destination displays; the free route-number field accepts keyboard symbols. [#967](https://github.com/openOMSI-Project/openOMSI/pull/967)
 
 ## 0.1.1120 - 2026-10-02
 

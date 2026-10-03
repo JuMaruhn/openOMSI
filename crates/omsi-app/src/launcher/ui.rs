@@ -300,14 +300,6 @@ impl Ui {
         self.clip_stack.last().map(|c| c.0).unwrap_or(Rect::new(0.0, 0.0, self.size.x, self.size.y))
     }
 
-    /// An open list lies over `p`. `hover` already keeps controls from reacting under one;
-    /// the launcher asks this before it turns the bus under one, which goes through the
-    /// window's events rather than through a control.
-    pub fn popup_over(&self, p: Vec2) -> bool {
-        self.popup.as_ref().is_some_and(|q| popup_rect(q, self.size).contains(p))
-            || self.date_popup.as_ref().is_some_and(|q| date_rect(q, self.size).contains(p))
-    }
-
     pub fn rect_visible(&self, r: Rect) -> bool {
         let visible = intersect(self.clip_now(), r);
         visible.w > 0.0 && visible.h > 0.0
@@ -1012,6 +1004,14 @@ impl Ui {
         self.push_clip(r, 6.0);
         let content = body(self, Rect::new(r.x, r.y - off, r.w, r.h));
         self.pop_clip();
+        self.scroll_keep(name, r, content);
+    }
+
+    /// The scrolling of such a view: the bar, the wheel, and its own easing towards where it
+    /// was sent. `content` is what the rows came to, all of them.
+    pub fn scroll_keep(&mut self, name: &str, r: Rect, content: f32) {
+        let id = id_of(name);
+        let off = self.scroll.get(&id).copied().unwrap_or(0.0);
         let max = (content - r.h).max(0.0);
         let mut target = self.scroll.get(&(id ^ 0xabc)).copied().unwrap_or(off);
         if self.hover(r) && self.input.wheel.y.abs() > 0.0 && !self.wheel_taken {
@@ -1556,9 +1556,6 @@ mod tests {
         assert!(r.x >= 10.0, "the list runs off the window at {}", r.x);
         assert_eq!(r.y, button.y, "its top stands with the button's");
         assert!(r.bottom() <= ui.size.y - 10.0, "it hangs out of the window");
-        // the mouse over it is over an open list, so a drag there must not turn the bus
-        assert!(ui.popup_over(r.center()));
-        assert!(!ui.popup_over(Vec2::new(600.0, 600.0)));
     }
 
     /// A value the list does not hold (`selected` past its end) ticks nothing and is left

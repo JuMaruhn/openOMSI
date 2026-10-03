@@ -107,6 +107,8 @@ pub struct VehicleMesh {
     pub viewpoint: i32,
     /// `[smoothskin]` bones (empty for a rigid mesh, and for an AI type).
     pub skin: Vec<SkinBone>,
+    /// A backwards mesh drawn as wound after all (its pack's exporter, see `load`).
+    pub keep_winding: bool,
 }
 
 pub struct VehicleType {
@@ -115,7 +117,6 @@ pub struct VehicleType {
     pub model_dir: PathBuf,
     pub program: Arc<Program>,
     pub meshes: Vec<VehicleMesh>,
-    pub keep_winding: bool,
     /// Paint schemes / adverts from the `[CTC]` folders' `.cti` files.
     pub paint_schemes: Vec<PaintScheme>,
     /// `[texchanges]`: material textures a script variable swaps (roller blinds, trim).
@@ -224,6 +225,26 @@ pub fn load_paint_schemes(dir: &Path) -> Vec<PaintScheme> {
     schemes
 }
 
+/// The vehicle pack a mesh file belongs to (the folder under `Vehicles`, lower case), the
+/// unit its exporter's winding is judged by; a file elsewhere is judged with its folder.
+fn winding_pack(p: &Path) -> String {
+    // (a part borrowed as `..\..\Other\model\x.o3d`: the folders it climbs out of are not its own)
+    let mut comps: Vec<String> = Vec::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                comps.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => comps.push(c.as_os_str().to_string_lossy().to_ascii_lowercase()),
+        }
+    }
+    match comps.iter().rposition(|c| c == "vehicles") {
+        Some(i) if i + 2 < comps.len() => comps[i + 1].clone(),
+        _ => comps[..comps.len().saturating_sub(1)].join("/"),
+    }
+}
+
 /// Where a `[mesh]` file of a model lives: next to the model file as OMSI reads it, else -
 /// for add-ons laid out for another folder (Studio Polygon's `Configuration Files` sit
 /// beside `model`, and packs that borrow parts name them from the vehicle folder or the
@@ -313,7 +334,9 @@ impl VehicleType {
         }
         let mut meshes = Vec::new();
         let mut missing_packs: Vec<(String, usize)> = Vec::new();
-        let (mut turned, mut positive_forward, mut positive_backward) = (Vec::new(), 0usize, 0usize);
+        // (by the vehicle pack each mesh comes from, see `winding_pack`)
+        let mut turned: Vec<(usize, String)> = Vec::new();
+        let mut votes: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
         if !model.lods.is_empty() {
             let start = model.lods[0].first_mesh;
             let end = model
@@ -352,13 +375,14 @@ impl VehicleType {
                         };
                         // (a mesh none of whose bones is bound moves as a rigid one)
                         let skin = if skin.iter().any(|b| b.def_index.is_some()) { skin } else { Vec::new() };
+                        let pack = winding_pack(&p);
                         match omsi_geometry::positive_det_faces_forward(&m) {
-                            Some(true) => positive_forward += 1,
-                            Some(false) => positive_backward += 1,
+                            Some(true) => votes.entry(pack.clone()).or_default().0 += 1,
+                            Some(false) => votes.entry(pack.clone()).or_default().1 += 1,
                             None => {}
                         }
                         if omsi_geometry::turns_round(&m) {
-                            turned.push(meshes.len());
+                            turned.push((meshes.len(), pack));
                         }
                         meshes.push(VehicleMesh {
                             def_index: start + i,
@@ -369,6 +393,7 @@ impl VehicleType {
                             pivot: pivot_from_mesh(&m),
                             viewpoint: md.viewpoint,
                             skin,
+                            keep_winding: false,
                         })
                     }
                     Err(e) => {
@@ -383,12 +408,22 @@ impl VehicleType {
                 }
             }
         }
-        let keep_winding = positive_forward > positive_backward;
-        if keep_winding && !turned.is_empty() {
-            for &i in &turned {
-                omsi_geometry::reverse_winding(&mut meshes[i].data);
+        // A pack whose meshes with a positive determinant mostly face along their normals
+        // keeps the winding of its backwards ones (see bb0c32b: the Citelis' buttons). Asked
+        // of the whole vehicle, a part borrowed from another pack - a ticket machine, a
+        // display - was turned in one bus and kept in the next, whatever its own pack's
+        // exporter does: the same Atron machine inside out in some buses only (#977, #1054).
+        let mut kept = 0;
+        for (i, pack) in &turned {
+            let (forward, backward) = votes.get(pack).copied().unwrap_or_default();
+            if forward > backward {
+                omsi_geometry::reverse_winding(&mut meshes[*i].data);
+                meshes[*i].keep_winding = true;
+                kept += 1;
             }
-            log::info!("{}: {} meshes keep their winding ({positive_forward} of the meshes with a positive determinant face along their normals, {positive_backward} against them)", bus_file.display(), turned.len());
+        }
+        if kept > 0 {
+            log::info!("{}: {kept} meshes keep their winding (their packs' meshes with a positive determinant face along their normals: {votes:?})", bus_file.display());
         }
         for (pack, n) in &missing_packs {
             log::warn!(
@@ -484,7 +519,6 @@ impl VehicleType {
             missing_packs,
             mesh_bounds,
             mesh_boxes,
-            keep_winding,
         })
     }
 
@@ -642,7 +676,7 @@ impl VehicleType {
             return Some(std::borrow::Cow::Borrowed(&m.data));
         }
         match omsi_o3d::load_mesh(&m.file) {
-            Ok(o) => Some(std::borrow::Cow::Owned(omsi_geometry::mesh_from_o3d_turning(&o, !self.keep_winding))),
+            Ok(o) => Some(std::borrow::Cow::Owned(omsi_geometry::mesh_from_o3d_turning(&o, !m.keep_winding))),
             Err(e) => {
                 log::warn!("{}: {e}", m.file.display());
                 None
@@ -1728,8 +1762,8 @@ impl VehicleInstance {
                     self.put(w[0], rw.rotation_deg.to_radians());
                     self.put(w[1], rw.rpm);
                     // (each axle's own angle: OMSI turns every axle towards the centre of
-                    // the bend on the `[rot_pnt_long]` line)
-                    self.put(w[2], rw.steer);
+                    // the bend on the `[rot_pnt_long]` line - one angle for both sides)
+                    self.put(w[2], rb.axle_steer(ai * 2 + si));
                     // `Axle_Suspension_*` is the wheel's travel *relative to the body*, and
                     // the stock model.cfg moves the wheel down for a positive value
                     // (`origin_rot_y -90` + `anim_trans`, checked with OMSI_DEBUG_ANIM on
@@ -2161,9 +2195,8 @@ impl VehicleInstance {
             0.0
         };
         // `steer_deg` is the front wheel angle of a bicycle model turning about the
-        // `[rot_pnt_long]` line: every wheel ahead of that line points at the common turning
-        // centre (the inner one further than the outer, as with Ackermann steering), and
-        // every wheel rolls as far as its own track through the bend is long
+        // `[rot_pnt_long]` line: every axle ahead of that line points at the common turning
+        // centre, and every wheel rolls as far as its own track through the bend is long
         let (rot, wheelbase) = crate::ai_motion::rotation_point(&self.ty.def);
         let k = ai.steer_deg.to_radians().tan() / wheelbase;
         for (ai_idx, axle) in self.v_wheels.clone().iter().enumerate() {
@@ -2173,8 +2206,10 @@ impl VehicleInstance {
                 };
                 let arm = ws.long - rot;
                 let across = 1.0 - ws.lat * k;
+                // (the axle's angle, the same for both sides, as Omsi.exe hands it to the
+                // scripts: see `RigidBody::axle_steer`)
                 let steer = if arm > 0.5 {
-                    (arm * k).atan2(across).clamp(-1.2, 1.2)
+                    (arm * k).atan().clamp(-1.2, 1.2)
                 } else {
                     0.0
                 };
@@ -3128,6 +3163,76 @@ fn scripts_acceleration(accel_body: Vec3, orientation: Quat) -> Vec3 {
     accel_body - orientation.inverse().mul_vec3(Vec3::new(0.0, 0.0, 9.81))
 }
 
+/// Where the two parts of a consist meet, in the frame of the part in front and in the
+/// frame of the part behind: `(lead's rear, car's front)` along the longitudinal axis, or
+/// `None` when the declared coupling points are the right ones.
+///
+/// The two coupled parts of an articulated bus share one joint: the front section's
+/// `[coupling_back]` and the rear section's `[coupling_front]` name the same point of the
+/// world, and the bellows hang between the two bodies (the rear section's body ends short
+/// of the joint). A train is built the other way about: every car is a vehicle with scripts
+/// of its own and stands end to end with the next - and there the declared coupling points
+/// need not be the cars' ends at all. The CR200J's head car names a rear coupling 2.6 m
+/// inside its body (hand-tuned in Omsi.exe, where the cars are put together by their
+/// bodies, so the value costs nothing); taken as the car's end, the second car was pulled
+/// 2.6 m into the first, its nose pressed through the head car's tail.
+///
+/// So a rail car butts its model to the leading car's model; any other part - a trailer,
+/// an articulated-bus rear section - keeps the declared joint. The values are in the body
+/// frame, so that a caller that turns a reversed part around (`TrailerPart::body_rotation`)
+/// needs no more than this; a caller that does not (`Traffic::blocked`, which lays the cars
+/// straight along the heading) must turn them itself - see [`coupling_placement`].
+pub fn coupling_offsets(
+    lead: &VehicleType,
+    lead_reversed: bool,
+    car: &VehicleType,
+    car_reversed: bool,
+) -> Option<(f32, f32)> {
+    if !car.def.is_rail() {
+        return None;
+    }
+    // the leading car's rear end (its front end when it runs turned round), the car's own
+    // front end (its rear end when the car runs turned round)
+    let lead_rear = lead.model_box().map(|(lo, hi)| if lead_reversed { hi.y } else { lo.y })?;
+    let car_front = car.model_box().map(|(lo, hi)| if car_reversed { lo.y } else { hi.y })?;
+    Some((lead_rear, car_front))
+}
+
+/// Where a car of a consist stands, for a caller that lays the cars along one heading with
+/// no turn of its own (`Traffic::blocked`): the world position and heading of the car whose
+/// body front sits at the joint [`coupling_offsets`] named.
+///
+/// Both `lead_reversed` and `reversed` are absolute orientations (a car's own, as
+/// `Traffic::trailer_chain` carries them - `next_coupled` already folds the flag of each
+/// coupling into the value it returns), and `heading` is the consist's own - the head car's.
+/// A car's body sits along the consist's heading turned round when it is itself turned
+/// round, so its heading is derived from `reversed` alone and never from the car in front
+/// of it: two cars turned round in a row would otherwise come out turned twice and lie on
+/// top of each other.
+///
+/// `back` is the leading car's body end in the leading car's frame and `front` this car's
+/// body front in its own, so the joint lies `back` along the lead's heading (turned round
+/// when the *lead* is) and the car's origin steps back from it by `front` along the car's
+/// own heading. A caller that turns the part around itself (`TrailerPart::body_rotation`)
+/// needs none of this.
+pub fn coupling_placement(
+    lead_origin: DVec3,
+    heading: f64,
+    lead_reversed: bool,
+    back: f32,
+    reversed: bool,
+    front: f32,
+) -> (DVec3, f64) {
+    let turned = |base: f64, rev: bool| if rev { base + 180.0 } else { base };
+    let lead_h = turned(heading, lead_reversed);
+    let lh = lead_h.to_radians();
+    let joint = lead_origin + DVec3::new(lh.sin(), lh.cos(), 0.0) * back as f64;
+    let car_h = turned(heading, reversed);
+    let ch = car_h.to_radians();
+    let origin = joint - DVec3::new(ch.sin(), ch.cos(), 0.0) * front as f64;
+    (origin, car_h)
+}
+
 impl TrailerPart {
     /// Pitch (degrees, nose up), eased axle height and the track point it stands on (for
     /// the `OMSI_DEBUG_TRAILERS` trace).
@@ -3168,12 +3273,13 @@ impl TrailerPart {
         );
         // Couplings stay in the body frame: `body_rotation` already turns a reversed part
         // around, so its rear coupling faces the leading vehicle and its front axle trails.
+        // See [`coupling_offsets`] for where the two parts of a consist meet.
         let own_front = if reversed {
             ty.def.coupling_back.as_ref().map(|c| Vec3::from(c.pos))
         } else {
             ty.def.coupling_front.as_ref().map(|c| Vec3::from(c.pos))
         };
-        let coupling_front = own_front.unwrap_or(if reversed {
+        let mut coupling_front = own_front.unwrap_or(if reversed {
             Vec3::new(0.0, -4.0, 0.3)
         } else {
             Vec3::new(0.0, 4.0, 0.3)
@@ -3183,11 +3289,17 @@ impl TrailerPart {
         } else {
             main.def.coupling_back.as_ref().map(|c| Vec3::from(c.pos))
         };
-        let coupling_back = lead_back.unwrap_or(if main_reversed {
+        let mut coupling_back = lead_back.unwrap_or(if main_reversed {
             Vec3::new(0.0, 4.0, 0.3)
         } else {
             Vec3::new(0.0, -4.0, 0.3)
         });
+        // A train stands its cars end to end by their bodies; the heights stay the declared
+        // couplings', which the pitch of the part hangs on.
+        if let Some((lead_rear, car_front)) = coupling_offsets(main, main_reversed, &ty, reversed) {
+            coupling_back.y = lead_rear;
+            coupling_front.y = car_front;
+        }
         // the line the part turns about: its own `[rot_pnt_long]` where a road part names
         // one (Omsi.exe runs every section as a body of its own on the same wheel physics,
         // each axle steered towards the turning centre on that line), else the axle
@@ -3903,6 +4015,21 @@ pub fn skin_vertices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_borrowed_part_is_judged_with_its_own_pack() {
+        // the same machine from its own pack, whichever bus borrows it (#977)
+        let a = winding_pack(Path::new("/omsi/Vehicles/Citelis/model/body.o3d"));
+        let b = winding_pack(Path::new("/omsi/vehicles/Atron_AFR4/model/afr4.o3d"));
+        let c = winding_pack(Path::new("/omsi/Vehicles/MAN_SD200/model/../../Atron_AFR4/model/afr4.o3d"));
+        assert_eq!(a, "citelis");
+        assert_eq!(b, "atron_afr4");
+        assert_eq!(winding_pack(Path::new("/omsi/Vehicles/Atron_AFR4/model/sub/afr4.o3d")), b);
+        assert_eq!(c, b);
+        let elsewhere = winding_pack(Path::new("/omsi/Sceneryobjects/x/model/y.o3d"));
+        assert_eq!(elsewhere, winding_pack(Path::new("/omsi/Sceneryobjects/x/model/z.o3d")));
+        assert_ne!(elsewhere, winding_pack(Path::new("/omsi/Sceneryobjects/w/model/y.o3d")));
+    }
 
     #[test]
     fn script_speed_reports_tiny_resting_motion_as_stopped() {

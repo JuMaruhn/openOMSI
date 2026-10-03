@@ -961,7 +961,8 @@ impl Traffic {
             // trafficdensity` for it (see `uvg_density`): 0 means only where the paths ask
             // for the group. Taken as "off", Spandau had no trucks and no Trabant at all,
             // though 865 paths ask for the one and 462 around Falkensee for the other.
-            // `OMSI_TRAFFIC_ALL_GROUPS=1` lets such groups drive everywhere.
+            // `OMSI_TRAFFIC_ALL_GROUPS=1` lets such groups drive everywhere (and, on a map
+            // without the file, every group, not only the default one).
             let all_groups = omsi_cfg::env::var_os("OMSI_TRAFFIC_ALL_GROUPS").is_some();
             let unscheduled: Option<Vec<(String, i32)>> =
                 omsi_cfg::CfgFile::read(&world.map_dir.join("unsched_vehgroups.txt"))
@@ -980,9 +981,20 @@ impl Traffic {
                     .collect();
             }
             let lists = &world.ailists;
-            for g in lists.groups.iter().filter(|g| {
+            // Without `unsched_vehgroups.txt` the random traffic is the ailists' default group
+            // alone (the first, or the one the `[ailist]` header names): Omsi.exe 0x785f98
+            // makes one nameless group then, and a nameless group takes the default group.
+            // Taking every group instead, a map whose ailists keep an ambulance (or a bus,
+            // or a lorry) in a group of its own had one car in four of that kind (#1025).
+            if unscheduled.is_none() && !all_groups {
+                if let Some(g) = lists.groups.get(lists.default_group) {
+                    log::info!("random traffic: no unsched_vehgroups.txt, only the default AI group {}", g.name);
+                }
+            }
+            for (_, g) in lists.groups.iter().enumerate().filter(|(i, g)| {
                 !g.is_depot
                     && g.hof.is_none()
+                    && (unscheduled.is_some() || all_groups || *i == lists.default_group)
                     && !g
                         .vehicles
                         .iter()
@@ -1027,11 +1039,8 @@ impl Traffic {
                     let path = omsi_cfg::resolve_path(root, &v.file);
                     match VehicleType::load_ai(root, &path) {
                         Ok(t) => {
-                            // `[type]` 2 = rail (only as scheduled trains), 3 = aircraft on flight paths
-                            let rail =
-                                matches!(t.def.kind, omsi_vehicle::vehicle::VehicleKind::Other(2))
-                                    || t.def.rail_body_osc.is_some()
-                                    || !t.def.contact_shoes.is_empty();
+                            // rail (only as scheduled trains), 3 = aircraft on flight paths
+                            let rail = t.def.is_rail();
                             let air =
                                 matches!(t.def.kind, omsi_vehicle::vehicle::VehicleKind::Other(3));
                             if rail {
@@ -6207,29 +6216,40 @@ impl Traffic {
             pos,
             heading,
         ))];
-        let h = heading.to_radians();
-        let fwd = DVec3::new(h.sin(), h.cos(), 0.0);
-        let (mut origin, mut lead) = (pos, ty.clone());
-        for (t, _) in self.trailer_chain(ty) {
-            let back = lead
-                .def
-                .coupling_back
-                .as_ref()
-                .map(|c| c.pos[1])
-                .unwrap_or(-4.0);
-            let front = t
-                .def
-                .coupling_front
-                .as_ref()
-                .map(|c| c.pos[1])
-                .unwrap_or(4.0);
-            origin += fwd * (back - front) as f64;
-            bodies.push(grown(omsi_sim::collision::Obb::from_box(
-                t.def.bounding_box.unwrap_or(DEFAULT_BOX),
+        let (mut origin, mut lead, mut lead_rev) = (pos, ty.clone(), false);
+        for (t, rev) in self.trailer_chain(ty) {
+            let (back, front) = match omsi_sim::vehicle::coupling_offsets(&lead, lead_rev, &t, rev) {
+                Some((back, front)) => (back, front),
+                None => {
+                    // the declared joint, each end the one the part's own way names (as
+                    // `TrailerPart::new_ex` takes it): a part turned round couples by its
+                    // `[coupling_front]`, not by its `[coupling_back]`
+                    let cb = if lead_rev { lead.def.coupling_front.as_ref() } else { lead.def.coupling_back.as_ref() };
+                    let cf = if rev { t.def.coupling_back.as_ref() } else { t.def.coupling_front.as_ref() };
+                    (
+                        cb.map(|c| c.pos[1]).unwrap_or(if lead_rev { 4.0 } else { -4.0 }),
+                        cf.map(|c| c.pos[1]).unwrap_or(if rev { -4.0 } else { 4.0 }),
+                    )
+                }
+            };
+            // each car stands along the consist's heading, turned round by its own
+            // (absolute) orientation - never by the car in front of it
+            let (center, car_heading) = omsi_sim::vehicle::coupling_placement(
                 origin,
                 heading,
+                lead_rev,
+                back,
+                rev,
+                front,
+            );
+            bodies.push(grown(omsi_sim::collision::Obb::from_box(
+                t.def.bounding_box.unwrap_or(DEFAULT_BOX),
+                center,
+                car_heading,
             )));
+            origin = center;
             lead = t;
+            lead_rev = rev;
         }
         let reach = bodies
             .iter()
@@ -6563,7 +6583,7 @@ impl Traffic {
                     ctl.request.get(li).copied().unwrap_or(false) as i32 as f32,
                 )
             })
-            .unwrap_or((-1.0, 0.0))
+            .unwrap_or((omsi_sim::traffic::UNLINKED_PHASE as f32, 0.0))
     }
 
     pub fn sync(&mut self, world: &World, renderer: &Renderer, scene: &mut Scene) {
@@ -6633,8 +6653,9 @@ impl Traffic {
                     ctl.state(lamp.index),
                     ctl.request.get(lamp.index).copied().unwrap_or(false),
                 ),
-                // a lamp whose crossing has no program stays dark
-                None => (-1, false),
+                // a lamp that names no crossing, or one whose crossing has no program,
+                // reads the engine's dummy (see `UNLINKED_PHASE`): red, as in OMSI
+                None => (omsi_sim::traffic::UNLINKED_PHASE, false),
             };
             let (r, y, g) = TrafficLightController::lamps(state);
             let value = |lamp: &crate::scene::LightObject, var: &str| -> f32 {

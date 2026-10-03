@@ -109,7 +109,8 @@ The mouse wheel (and **=** / **-**, a pinch on a phone) zooms: outside the camer
 inside the bus the view narrows, as in OMSI; **Ctrl**+wheel outside narrows the view instead
 (a telephoto, the camera stays where it is). F1-F4 driver / passenger / outside / map (free) camera, F5-F8 the destination
 sign and roller blind keys as in OMSI, Ctrl+S quick save, F9 write the run into the personnel
-file, WASD+QE in the free camera, left click on cockpit elements, **V** the chat line in a
+file, WASD+QE in the free camera (**Ctrl**+click on the ground there moves the bus to the
+nearest street), left click on cockpit elements, **V** the chat line in a
 LAN session. Esc opens the game menu: drive the next placed vehicle, place any vehicle of
 the installation in front of the camera (or beside the bus), couple what stands close behind
 the bus and uncouple it again, save the situation or load the quicksave, the next weather, the clock an hour on or back, refuel and wash (only at a
@@ -181,7 +182,7 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   lines and are saved together (*Save all*); **New line** makes a line, **Repeat** turns a tour
   into a whole day of them (every *n* minutes up to a last departure).
 * **Vehicle Editor** - the chosen bus by itself, over the whole page: the same picture the
-  Drive page shows in its card, drawn by the game's own renderer, so it is the bus as it will
+  Drive page stands its bus on, drawn by the game's own renderer, so it is the bus as it will
   stand on the road - its paint, its materials and the light of the chosen time and weather.
   Drag it to turn it, the wheel zooms. The buttons down its right open their choices beside
   them, towards the left, so the list never covers the bus. *Weather* offers every weather
@@ -190,7 +191,7 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   look at - the custom editor, the airport's live report and the cycle that changes as the
   game runs. *Time* offers day, dusk and night as hours of this map and this date, worked out
   from where the sun actually stands, so a northern map's dusk in December is not its dusk in
-  June. Both set the same time and weather the Drive page's *Time & weather* step sets.
+  June. Both set the same time and weather the Drive page's *Day & weather* step sets.
 * **Setup** - where the original installation and the game binary are. The OMSI 2 folder may
   be given as a path with quotes, as `Omsi.exe` itself or as a folder inside it; unpacked into
   the OMSI 2 folder itself, openOMSI keeps its own content in an `openOMSI` folder there and
@@ -276,14 +277,20 @@ lit cumulus) that also lights the scene, contact-hardening sun shadows, aerial p
 and height fog, automatic exposure, a glow only real highlights produce and the PBR
 Neutral tone curve with FXAA (`post_aa`); no light shafts, vignette or grading.
 
-The enhanced renderer also reflects buses, buildings and scenery in wet road puddles
-when `reflections=1`. Shallow rain ripples and depth-aware filtering soften the image.
+Vanilla, Vanilla+ and Enhanced reflect buses, buildings and scenery in wet road puddles
+when `reflections=1`, each using its own lighting. Depth-aware filtering softens the image;
+Enhanced also shades shallow rain ripples.
 The player's nearby bus and up to three coupled sections use one local geometry capture,
 mirrored around the actual road face's height and slope. Its windows are shaded from the
 reflected eye, and an open legacy chassis gets a dark underside in that same depth-tested
 view. This avoids mixing offset screen-space and geometry projections on the bus.
 Other objects use the current frame's colour and a private hit-depth texture that includes
-reflective windows. Rays run at half resolution, capped at 518400 pixels and 48 steps;
+reflective windows. From inside the bus, its own panes let the rays reach the street;
+glass tint and rain films attenuate the reflection along with the scene behind them.
+Vanilla blends wet-road reflections and fog in the original encoded colour space.
+Rain drops refract a separate, full-resolution copy of the current scene, including
+its puddle reflections, so wet glass and moving wipers do not feed back into later frames.
+Rays run at half resolution, capped at 518400 pixels and 48 steps;
 the local bus capture has the same pixel cap and a 60 m distance limit. Dry roads,
 snow-covered roads and mirror views skip these passes. Reflections beyond the local road
 plane use screen-space rays; objects unavailable to those rays keep the sky reflection.
@@ -444,6 +451,7 @@ Environment variables, all off unless set. The useful ones:
 | `OMSI_FLEET_IDLE=s`, `OMSI_FLEET_AHEAD=min` | how long an unused vehicle set is kept, how far ahead the fleet is read |
 | `OMSI_NO_BC=1`, `OMSI_NO_TEXCOMPRESS=1`, `OMSI_KEEP_ALLOCATOR=1` | textures as RGBA, no compression of loose pictures, no allocator restart |
 | `OMSI_NO_SHADOWS`, `OMSI_NO_CORONAS`, `OMSI_NO_ENVMAP`, `OMSI_NO_BUMP`, `OMSI_NO_CULL`, `OMSI_ENV_PHOTO=0` | leave one part of the picture out for an A/B |
+| `OMSI_NO_SURF=1` | roads without the bumps of their textures' `.surf` maps (A/B) |
 | `OMSI_NO_PUDDLE_REFLECTIONS=1` | leave wet-road scene reflections out for a screenshot or performance comparison |
 | `OMSI_DEBUG_ENHANCED`, `OMSI_DEBUG_SKY`, `OMSI_DEBUG_EXPOSURE`, `OMSI_METER=…` | the enhanced renderer's lamps, sky, adaptation and metering |
 | `OMSI_DEBUG_TRAFFIC`, `OMSI_DEBUG_PAX`, `OMSI_DEBUG_PHYSICS`, `OMSI_DEBUG_LAN`, `OMSI_DEBUG_IBIS`, `OMSI_DEBUG_VARS=a,b` | why a car, a passenger, a wheel, a peer, an IBIS or a script variable does what it does |
@@ -455,6 +463,7 @@ Environment variables, all off unless set. The useful ones:
 | `OMSI_NO_LAN_MODS=1` | a LAN host serves no mods and a joining game fetches none |
 | `OMSI_BACKEND=vulkan\|dx12\|gl` | the graphics interface to ask first (the log lists every adapter each one offers) |
 | `OMSI_GPU_LIMITS=default\|downlevel` | pretend the graphics card can only do this much (tests of old cards) |
+| `OMSI_GPU_ARRAYS=textures\|nostorage` | read the scene's arrays from textures, as on OpenGL chips without storage buffers in the vertex shader (or without any: no per-pixel lamp light) - tests of old cards |
 | `OMSI_RENDER_OCCLUDED=1` | draw even while the window is hidden (tests) |
 | `OMSI_CHECK_OBSTACLES=1` | offscreen: drive every lane as a bus and list the objects that would stop it |
 | `OMSI_DEBUG_REPEATERS=1` | list the spline object rows whose start the map and the spline chain disagree about |

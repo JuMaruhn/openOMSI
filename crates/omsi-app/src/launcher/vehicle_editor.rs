@@ -1,12 +1,16 @@
 //! The Vehicle Editor page: the chosen bus by itself, in the picture the game's own renderer
 //! draws of it (see `showroom`), over the whole page. The mouse turns it and the wheel zooms
-//! it, as on the Drive page's card - `Launcher::preview` does both, and the picture is the
-//! one the showroom has already made for that page, so opening this one costs nothing.
+//! it, as on the Drive page - the picture is the one the showroom has already made for that
+//! page, so opening this one costs nothing.
 //!
 //! Down the right stands a panel of buttons, each opening its choices beside it towards the
 //! left, so the list never covers the very thing it changes. They set the same
-//! `state.choice` fields the Drive page's Time & weather step sets, which is what the
+//! `state.choice` fields the Drive page's day and weather step sets, which is what the
 //! showroom watches: the bus is not read again, only its light (see `Showroom::update`).
+//!
+//! The picture is `Launcher::preview_full`, the stage the Drive page stands its bus on, and
+//! `showroom_pointer` gives the wheel and the cursor to the showroom once the panel has had
+//! the mouse. A drag on the panel is kept off the bus the same way, by `Ui::over_ui`.
 
 use super::state::hhmm;
 use super::Launcher;
@@ -38,9 +42,11 @@ pub fn draw(l: &mut Launcher, r: Rect) {
         PANEL_W,
         PANEL_PAD * 2.0 + rows * BUTTON_H + (rows - 1.0) * 8.0,
     );
-    l.preview_block = Some(panel);
-    l.preview(page);
+    // the bus has the page to itself: the panel is a card in a corner, not a column beside
+    // it, so the showroom frames it in the middle (`focus` 0.5) rather than to one side
+    l.preview_full(page, 0.5);
     buttons(l, panel);
+    l.showroom_pointer(page);
 }
 
 fn buttons(l: &mut Launcher, panel: Rect) {
