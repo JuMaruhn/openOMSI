@@ -24,3 +24,6 @@ windows = { version = "0.62", features = ["Win32_Graphics_Dxgi", "Win32_Foundati
 
 [dev-dependencies]
 naga = { version = "29", features = ["spv-out", "glsl-out"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ash = "0.38"

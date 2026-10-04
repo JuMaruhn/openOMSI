@@ -32,6 +32,26 @@ pub(crate) fn steering_view_yaw(current: f32, steering: f32, dt: f32, enabled: b
     current + (target - current) * (1.0 - (-dt.max(0.0) / response.clamp(0.05, 1.0)).exp())
 }
 
+pub(crate) fn driver_head_look(look: (f32, f32), view: &str, pitch_deg: f32) -> (f32, f32) {
+    if view == "driver" {
+        (look.0, look.1 + pitch_deg)
+    } else {
+        look
+    }
+}
+
+#[cfg(test)]
+mod driver_head_look_tests {
+    use super::driver_head_look;
+
+    #[test]
+    fn head_pitch_adjusts_driver_view_in_any_display_mode_only() {
+        assert_eq!(driver_head_look((4.0, 2.0), "driver", 10.0), (4.0, 12.0));
+        assert_eq!(driver_head_look((4.0, 2.0), "pax", 10.0), (4.0, 2.0));
+        assert_eq!(driver_head_look((4.0, 2.0), "outside", 10.0), (4.0, 2.0));
+    }
+}
+
 fn is_manual_gate_action(name: &str) -> bool {
     let Some(gate) = name.get(..5).filter(|p| p.eq_ignore_ascii_case("kw_s_")).and_then(|_| name.get(5..)) else {
         return false;
@@ -141,6 +161,10 @@ pub(crate) struct Player {
     /// Its speed (m/s) and the body's turning rates of the frame before (see `move_head`).
     pub(crate) head_vel: Vec3,
     pub(crate) head_omega: Vec3,
+    /// What a head does when nothing moves it: the slow sway of a standing body, kept apart
+    /// from `head` so the bus's own head movement is never fed it (Settings -> idle head sway;
+    /// read through `head_offset`).
+    pub(crate) head_idle: crate::head_idle::HeadIdle,
     /// How far the driver's view is turned into the steering (degrees of yaw; see `move_head`).
     pub(crate) steer_look: f32,
     /// The driver's seat moved (Settings → seat position; bus frame, m).
@@ -1418,6 +1442,23 @@ impl Player {
         }
     }
 
+    /// The head of someone who is doing nothing at all: a standing body breathes and shifts
+    /// its weight, so the view is never quite still while the bus waits at a stop (Settings ->
+    /// idle head sway, off by default). `strength` is how much of the sway is asked for and
+    /// `pace` how fast it is to move, against the pace it is designed at.
+    /// Nothing of it is written into `head`: the springs above stay the bus's business alone.
+    pub(crate) fn move_head_idle(&mut self, dt: f32, strength: f32, pace: f32) {
+        self.head_idle.step(dt, strength, pace);
+    }
+
+    /// Where the driver's eye is in the bus's frame: the head OMSI's head movement throws
+    /// about, with the sway of a head at rest on top of it (`head` and `head_idle`, added
+    /// nowhere else - `driver_world`, `camera_look` and the mirrors' `driver_eye` all ask
+    /// here, so they cannot disagree).
+    pub(crate) fn head_offset(&self) -> Vec3 {
+        self.head + self.head_idle.offset
+    }
+
     /// The automatic clutch of the settings for a gear lever whose scripts do not read
     /// OMSI's `AutoClutch` (the LiAZ MKPP): with a gear in and the bus slow, the clutch
     /// bites as the throttle goes down, as a driver lets it up - without it every start
@@ -2062,7 +2103,8 @@ impl Player {
     /// (the same as `camera_look` makes of the driver's camera).
     pub(crate) fn driver_world(&self, turned: &omsi_vehicle::Camera) -> Camera {
         let (eye, yaw, pitch, roll) = self.vehicle.camera_world_full(turned);
-        let eye = eye + self.vehicle.body_rotation().transform_vector3(self.head + self.seat).as_dvec3();
+        // the driver's eye sits a touch forward of the authored seat point.
+        let eye = eye + self.vehicle.body_rotation().transform_vector3(self.head_offset() + self.seat + EYE_NUDGE).as_dvec3();
         Camera { position: eye, yaw, pitch: pitch.clamp(-89.0, 89.0), roll, fov_deg: turned.fov, near: 0.1, far: 6000.0 }
     }
 
@@ -2097,7 +2139,7 @@ impl Player {
     ) -> Camera {
         let def = &self.vehicle.ty.def;
         let c = def.camera_outside_center;
-        let centre = orbit_pivot(self.vehicle.position, self.vehicle.heading, c);
+        let centre = camera_arm::lift_pivot(world, orbit_pivot(self.vehicle.position, self.vehicle.heading, c));
         let want = dist.clamp(ORBIT_MIN, ORBIT_MAX);
         let back = -cam.forward().as_dvec3().normalize_or_zero();
         if back.length_squared() < 0.5 {
@@ -2216,7 +2258,7 @@ impl Player {
                 // cab rocked about it - the "boat" (the body's own motion matches Omsi's).
                 let turned = omsi_vehicle::Camera { yaw: c.yaw + look.0 + if view == "driver" { self.steer_look } else { 0.0 }, pitch: (c.pitch + look.1).clamp(-89.0, 89.0), ..c.clone() };
                 let (eye, yaw, pitch, roll) = self.vehicle.camera_world_full(&turned);
-                let eye = if view == "driver" { eye + self.vehicle.body_rotation().transform_vector3(self.head + self.seat).as_dvec3() } else { eye };
+                let eye = if view == "driver" { eye + self.vehicle.body_rotation().transform_vector3(self.head_offset() + self.seat + EYE_NUDGE).as_dvec3() } else { eye };
                 // near 0.1 as in Omsi.exe (every view, 0x6f6aa7); with the reversed float
                 // depth buffer it costs no precision out at 6 km
                 Camera {
@@ -2259,6 +2301,11 @@ pub(crate) fn orbit_pivot(position: DVec3, heading_deg: f64, center: [f32; 3]) -
             .transform_point3(Vec3::new(center[0], center[1], center[2]))
             .as_dvec3()
 }
+
+/// Driver eye forward offset, currently zeroed: how OMSI 2 keeps the turning
+/// head from clipping inside the seat mesh still needs figuring out (per-bus
+/// mesh handling), so no global offset until then. Kept as the single knob.
+pub(crate) const EYE_NUDGE: Vec3 = Vec3::ZERO;
 
 /// Put a vehicle's meshes where its state says (animations, visibility, lights, the
 /// matrix textures) - the player's bus, and the launcher's showroom bus.

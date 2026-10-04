@@ -115,8 +115,10 @@ fn mapped_splines_and_objects_use_uncut_base_while_ground_keeps_paint() {
         tx: 0,
         ty: 0,
         terrain: Some(triangle(0.0)),
+        hole_walls: triangle(-0.5),
         paint_masks: Vec::new(),
         paint: vec![(1, TextureData::from_image(Image::solid([255; 4])), 1.0)],
+        wall_paint: vec![(1, TextureData::from_image(Image::solid([255; 4])))],
         water: None,
         // Both upload paths must agree: a spatially batched mapped spline and one
         // left in the per-spline path (OMSI_NO_GROUND_SPLINE_BATCHING).
@@ -154,8 +156,8 @@ fn mapped_splines_and_objects_use_uncut_base_while_ground_keeps_paint() {
         .collect();
     assert_eq!(
         terrain.len(),
-        2,
-        "the ordinary terrain retains its base and painted layer"
+        4,
+        "the ground and its exposed sides retain their base and painted layers"
     );
     let ground_base = &scene.materials[terrain[0].materials[0]];
     assert_eq!(ground_base.texture, Some(base_texture));
@@ -163,9 +165,23 @@ fn mapped_splines_and_objects_use_uncut_base_while_ground_keeps_paint() {
         ground_base.transmap.is_some(),
         "the actual ground retains its road cut"
     );
-    let paint = &scene.materials[terrain[1].materials[0]];
+    let wall_base = &scene.materials[terrain[1].materials[0]];
+    assert_eq!(wall_base.texture, Some(base_texture));
+    assert_eq!(
+        wall_base.transmap, None,
+        "the hole mask must not erase its sides"
+    );
+    assert_eq!(wall_base.nightmap, ground_base.nightmap);
+    let paint = &scene.materials[terrain[2].materials[0]];
     assert_ne!(paint.texture, Some(base_texture));
-    assert!(terrain[1].ground_layer);
+    assert!(terrain[2].ground_layer);
+    let wall_paint = &scene.materials[terrain[3].materials[0]];
+    assert_eq!(wall_paint.texture, paint.texture);
+    assert!(terrain[3].ground_layer);
+    assert_ne!(
+        wall_paint.transmap, paint.transmap,
+        "wall brush masks stay uncut"
+    );
 
     let mapped: Vec<_> = scene
         .instances
@@ -237,8 +253,10 @@ fn a_maps_own_route_arrow_shows_only_with_the_route_arrows() {
         tx: 0,
         ty: 0,
         terrain: Some(triangle(0.0)),
+        hole_walls: MeshData::default(),
         paint_masks: Vec::new(),
         paint: Vec::new(),
+        wall_paint: Vec::new(),
         water: None,
         ground_splines: Vec::new(),
         splines: Vec::new(),

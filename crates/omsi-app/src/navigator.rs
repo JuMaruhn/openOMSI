@@ -78,6 +78,25 @@ fn traffic_kind(c: &crate::traffic::AiCar) -> (Color, Option<String>) {
     };
     (color, line)
 }
+/// A bus, trolleybus or tram on the map as a pictogram, not a dot: a body with a cut front and
+/// a windscreen, turned to the way it heads (`heading`: degrees clockwise from north), a dark
+/// edge round it. `min_px` keeps it readable from far away; the line number is drawn beside it.
+fn vehicle_icon(p: &mut Painter, at: Vec3, heading: f64, color: Color, long: bool, min_px: f32) {
+    let h = heading.to_radians() as f32;
+    let (sn, cs) = h.sin_cos();
+    // local: x to the right, y forward; turned onto the world (x east, y north)
+    let turn = |v: Vec2| Vec2::new(v.x * cs + v.y * sn, -v.x * sn + v.y * cs);
+    let l = if long { 1.5 } else { 1.0 };
+    let body = |k: f32| -> Vec<Vec2> {
+        [(-0.34, -1.0), (0.34, -1.0), (0.34, 0.55), (0.2, 1.0), (-0.2, 1.0), (-0.34, 0.55)].iter().map(|&(x, y)| turn(Vec2::new(x * k, y * l * k))).collect()
+    };
+    let (m, px) = (6.0, min_px);
+    p.world_shape(at, &body(1.28), m, px * 1.28, Color::rgba(8, 8, 8, 0.92));
+    p.world_shape(at, &body(1.0), m, px, color);
+    let glass: Vec<Vec2> = [(-0.24, 0.5), (0.24, 0.5), (0.15, 0.8), (-0.15, 0.8)].iter().map(|&(x, y)| turn(Vec2::new(x, y * l))).collect();
+    p.world_shape(at, &glass, m, px, Color::rgba(240, 244, 248, 0.9));
+}
+
 /// The route by how busy its roads are: empty, light, busy, heavy, jammed.
 const LEVEL: [Color; 5] = [
     Color::rgba(46, 116, 240, 1.0),
@@ -1087,9 +1106,12 @@ impl Navigator {
                     continue;
                 }
                 let (color, line) = traffic_kind(c);
-                let k = if color == DOT { 1.0 } else { 1.35 };
-                dy.world_disc(rel(c.vehicle.position), 1.7 * k, 3.6 * k, Color::rgba(8, 8, 8, 0.9));
-                dy.world_disc(rel(c.vehicle.position), 1.2 * k, 2.6 * k, color);
+                if color == DOT {
+                    dy.world_disc(rel(c.vehicle.position), 1.7, 3.6, Color::rgba(8, 8, 8, 0.9));
+                    dy.world_disc(rel(c.vehicle.position), 1.2, 2.6, color);
+                } else {
+                    vehicle_icon(&mut dy, rel(c.vehicle.position), c.vehicle.heading, color, c.is_rail(), 7.0);
+                }
                 if let Some(l) = line {
                     lines.push((c.vehicle.position, color, l));
                 }
@@ -2456,9 +2478,12 @@ impl Navigator {
         if let Some(t) = f.traffic.filter(|_| self.show_ai) {
             for car in t.cars.iter().filter(|c| !c.gone) {
                 let (color, line) = traffic_kind(car);
-                let k = if color == DOT { 1.0 } else { 1.4 };
-                dots.world_disc(rel(car.vehicle.position), 2.2 * k, 3.4 * k, Color::rgba(8, 8, 8, 0.9));
-                dots.world_disc(rel(car.vehicle.position), 1.5 * k, 2.3 * k, color);
+                if color == DOT {
+                    dots.world_disc(rel(car.vehicle.position), 2.2, 3.4, Color::rgba(8, 8, 8, 0.9));
+                    dots.world_disc(rel(car.vehicle.position), 1.5, 2.3, color);
+                } else {
+                    vehicle_icon(&mut dots, rel(car.vehicle.position), car.vehicle.heading, color, car.is_rail(), 7.5);
+                }
                 if let Some(l) = line {
                     lines.push((car.vehicle.position, color, l));
                 }
@@ -2896,5 +2921,17 @@ mod tests {
         let edge = stop_label_rect(Vec2::new(590.0, 200.0), 150.0, 1.0, win, &[]).unwrap();
         assert!(edge.right() < 600.0);
         assert!(stop_label_rect(p, 150.0, 1.0, win, &[win]).is_none());
+    }
+
+    #[test]
+    fn a_vehicle_icon_is_whole_triangles_of_edge_body_and_windscreen() {
+        let mut bus = Painter::new();
+        vehicle_icon(&mut bus, Vec3::ZERO, 90.0, Color::WHITE, false, 7.0);
+        // an edge and a body of six corners (four triangles each), a windscreen of four (two)
+        assert_eq!(bus.verts.len(), (4 + 4 + 2) * 3);
+        // a tram is longer, not made of more
+        let mut tram = Painter::new();
+        vehicle_icon(&mut tram, Vec3::ZERO, 0.0, Color::WHITE, true, 7.0);
+        assert_eq!(tram.verts.len(), bus.verts.len());
     }
 }

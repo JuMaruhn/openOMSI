@@ -1,0 +1,27 @@
+# Dependency updates, once a week. Minor and patch versions of the crates come together in
+# one pull request so they do not flood the list; a new major version (wgpu, winit...) comes
+# on its own, as it usually needs code changes. Security fixes come whenever an advisory is
+# published, whatever the schedule.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      crates:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns:
+          - "*"

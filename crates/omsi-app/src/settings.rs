@@ -100,6 +100,9 @@ pub struct Settings {
     /// laptop's touchpad has no middle button to look round with, and right-drag looking
     /// is what openOMSI always did.
     pub alt_view: bool,
+    /// Precision zoom: the both-drag zoom follows the FOV-multiplier curve
+    /// instead of OMSI's linear way over 500 px. Off (OMSI's way).
+    pub precision_zoom: bool,
     /// The 3D picture drawn at this fraction of the window's size and scaled up (0.5..1),
     /// 0 = automatic (full size unless the window has more pixels than a 2560x1080 screen,
     /// as a Retina window does). The HUD is always drawn at full size.
@@ -140,6 +143,9 @@ pub struct Settings {
     pub max_fps: u32,
     /// The chat of a LAN session (V shows and hides it, / types); off leaves it out altogether.
     pub chat: bool,
+    /// The chat's own size on top of the interface's (`ui_scale`): 0.5 .. 3, also set with
+    /// Ctrl + the mouse wheel over the chat.
+    pub chat_size: f32,
     /// The name of what the cursor points at, shown next to the cursor.
     pub tooltips: bool,
     /// The other players' names above their buses.
@@ -199,6 +205,8 @@ pub struct Settings {
     pub shadow_casters: String,
     /// Dead zone round the centre of a set-up game controller's axes (0..0.3).
     pub ctrl_deadzone: f32,
+    /// Use a gamepad's right stick for automatic camera movement.
+    pub right_stick_look: bool,
     /// Game controllers switched off, by name (`|` between them).
     pub ctrl_off: String,
     /// Keyboard steering at OMSI's steady pace (`KeyboardAxes::linear`).
@@ -227,6 +235,14 @@ pub struct Settings {
     pub ff_invert: bool,
     /// Force feedback and rumble at all (off: the controller neither pushes nor shakes).
     pub ff_enabled: bool,
+    /// The constant trembling of the tarmac under the wheels (0 = none .. 4 = strong).
+    pub ff_road_vib: f32,
+    /// The engine's buzz in the wheel, whatever gear the bus is in (0 = none .. 4 =
+    /// strong).
+    pub ff_engine_vib: f32,
+    /// How long (s) a jolt's or a script's vibration eases away once it stops (0: it stops
+    /// where it stands; 1.5 = a long easing-off).
+    pub ff_fade: f32,
     /// OMSI's held brake on the keyboard (see `KeyboardAxes::pedal_hold`); `brake_hold` in
     /// the file - the old `pedal_hold` (off unless set, and holding the throttle as well)
     /// is left behind.
@@ -244,6 +260,11 @@ pub struct Settings {
     /// How fast the view turns for the mouse's way while looking round (1 = Omsi.exe's
     /// field of view / 78.75 degrees per pixel in the views of the bus; #859).
     pub look_sens: f32,
+    /// How long the view takes to come round to where the mouse (or the stick, or the
+    /// arrow keys) turned it (milliseconds; 0 = off, the view goes there at once, as it
+    /// always did). A little of this takes the edge off a mouse that reports in jumps and
+    /// off a hand that shakes: the view glides to the angle instead of jumping to it.
+    pub look_smoothing_ms: f32,
     /// The bus's script may cancel the indicator after a turn (#451: off, an indicator set
     /// stays on until the player turns it off).
     pub blinker_cancel: bool,
@@ -264,12 +285,21 @@ pub struct Settings {
     pub steer_look_angle: f32,
     /// Steering-view smoothing time constant (seconds).
     pub steer_look_response: f32,
+    /// How much the view sways on its own when nothing is done to it: a head at rest breathes
+    /// and shifts its weight, and most of that is seen while the bus waits at a stop. 0 is not
+    /// at all (as OMSI, and the default); 1 is the whole of the sway `head_idle` makes.
+    pub head_idle: f32,
+    /// How fast that sway moves, against the pace it is designed at (1: as designed; below 1
+    /// slower, above it quicker).
+    pub head_idle_pace: f32,
     /// How strongly the analog throttle and brake pedals act: the response curve's
     /// strength (1 = linear, below 1 softer at the start, above 1 stronger).
     pub pedal_throttle: f32,
     pub pedal_brake: f32,
     /// The driver's eye moved from the bus's own camera (m, bus frame: right, forward, up).
     pub seat: [f32; 3],
+    /// The driver's default head pitch (degrees; positive looks up).
+    pub seat_pitch_deg: f32,
     /// Head tracking through opentrack's UDP output (TrackIR, webcams, phones), and its port.
     pub head_tracking: bool,
     pub head_tracking_port: u16,
@@ -327,7 +357,7 @@ impl Settings {
     }
     /// The defaults of a computer.
     fn desktop() -> Self {
-        Self { msaa: 4, anisotropy: 8, ssao: true, shadows: true, shadow_size: 2048, shadow_blobs: true, navigator: true, ui_opacity: 0.85, notes: true, ui_scale: 1.0, ui_scale_window: true, navigator_corner: "bottom-left".into(), boarding: "auto".into(), detail_textures: true, exact_fare: true, enhanced: false, graphics: "vanilla_plus".into(), triple: Default::default(), triple_span: true, triple_hud_center: true, vr: false, vr_scale: 0.65, vr_head_smoothing_ms: 0.0, vr_mirror_rate: 16.0, vr_desktop_mirror: true, fullscreen: false, vsync: true, volume: 0.6, drive_keys: "simple".into(), post_aa: "fxaa".into(), render_scale: 0.0, language: "ENG".into(), pax_voices: "all".into(), nav_arrows: false, nav_ai: true, get_up: false, texture_compression: true, texture_memory: 0, auto_clutch: true, momentary_gears: false, auto_shift: false, min_obj_size: 0.013, max_obj_dist: -1.0, max_fps: 0, chat: true, tooltips: true, name_tags: true, show_fps: false, clouds: true, pax_density: 1.0, vol_ai: 1.0, vol_scenery: 1.0, mirror_size: 256, mirror_hud: 0, mirror_refresh: "full".into(), doppler: true, driver: true, maintenance: 0, ai_unsched_factor: 1.0, ai_max_scheduled: 0, ai_max_parked: 0, ai_max_humans: 200, collision_vehicles: true, collision_objects: true, collision_pedestrians: true, head_movement: true, driverview_smooth: true, hands_in_cab: false, alt_view: true, time_speed: 1.0, time_sync: false, metar_sync: false, metar_station: String::new(), machine_translation: false, shadow_casters: "all".into(), ctrl_deadzone: 0.0, ctrl_off: String::new(), steering_linear: false, old_steering: false, red_steer_spd: false, reflections: true, led_glow: 6, led_mips: 1.3, mouse_sens: 1.0, graphics_api: "auto".into(), ff_invert: false, ff_enabled: true, brake_hold: true, mouse_steering: false, mouse_right_off: false, mouse_smooth: true, look_sens: 1.0, blinker_cancel: true, wheel_range: 900.0, wheel_lock: 0.0, fov: 0.0, camera_collision: true, steer_look: false, steer_look_angle: 30.0, steer_look_response: 0.25, pedal_throttle: 1.0, pedal_brake: 1.0, seat: [0.0; 3], head_tracking: false, head_tracking_port: 4242, head_tracking_invert: String::new(), discord_status: true, discord_app_id: String::new(), voice_chat: true, info_bar: false }
+        Self { msaa: 4, anisotropy: 8, ssao: true, shadows: true, shadow_size: 2048, shadow_blobs: true, navigator: true, ui_opacity: 0.85, notes: true, ui_scale: 1.0, ui_scale_window: true, navigator_corner: "bottom-left".into(), boarding: "auto".into(), detail_textures: true, exact_fare: true, enhanced: false, graphics: "vanilla_plus".into(), triple: Default::default(), triple_span: true, triple_hud_center: true, vr: false, vr_scale: 0.65, vr_head_smoothing_ms: 0.0, vr_mirror_rate: 16.0, vr_desktop_mirror: true, fullscreen: false, vsync: true, volume: 0.6, drive_keys: "simple".into(), post_aa: "fxaa".into(), render_scale: 0.0, language: "ENG".into(), pax_voices: "all".into(), nav_arrows: false, nav_ai: true, get_up: false, texture_compression: true, texture_memory: 0, auto_clutch: true, momentary_gears: false, auto_shift: false, min_obj_size: 0.013, max_obj_dist: -1.0, max_fps: 0, chat: true, chat_size: 1.0, tooltips: true, name_tags: true, show_fps: false, clouds: true, pax_density: 1.0, vol_ai: 1.0, vol_scenery: 1.0, mirror_size: 256, mirror_hud: 0, mirror_refresh: "full".into(), doppler: true, driver: true, maintenance: 0, ai_unsched_factor: 1.0, ai_max_scheduled: 0, ai_max_parked: 0, ai_max_humans: 200, collision_vehicles: true, collision_objects: true, collision_pedestrians: true, head_movement: true, driverview_smooth: true, hands_in_cab: false, alt_view: true, precision_zoom: false, time_speed: 1.0, time_sync: false, metar_sync: false, metar_station: String::new(), machine_translation: false, shadow_casters: "all".into(), ctrl_deadzone: 0.0, right_stick_look: true, ctrl_off: String::new(), steering_linear: false, old_steering: false, red_steer_spd: false, reflections: true, led_glow: 6, led_mips: 1.3, mouse_sens: 1.0, graphics_api: "auto".into(), ff_invert: false, ff_enabled: true, ff_road_vib: 1.0, ff_engine_vib: 1.0, ff_fade: 0.28, brake_hold: true, mouse_steering: false, mouse_right_off: false, mouse_smooth: true, look_sens: 1.0, look_smoothing_ms: 0.0, blinker_cancel: true, wheel_range: 900.0, wheel_lock: 0.0, fov: 0.0, camera_collision: true, steer_look: false, steer_look_angle: 30.0, steer_look_response: 0.25, head_idle: 0.0, head_idle_pace: 1.0, pedal_throttle: 1.0, pedal_brake: 1.0, seat: [0.0; 3], seat_pitch_deg: 0.0, head_tracking: false, head_tracking_port: 4242, head_tracking_invert: String::new(), discord_status: true, discord_app_id: String::new(), voice_chat: true, info_bar: false }
     }
 }
 
@@ -525,12 +555,14 @@ impl Settings {
                 "driverview_smooth" => s.driverview_smooth = b(v),
                 "hands_in_cab" => s.hands_in_cab = b(v),
                 "alt_view" => s.alt_view = b(v),
+                "precision_zoom" => s.precision_zoom = b(v),
                 "time_speed" => s.time_speed = v.trim_start_matches(['x', 'X']).parse::<f64>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(1.0, 30.0)).unwrap_or(s.time_speed),
                 "time_sync" | "real_time_sync" => s.time_sync = b(v),
                 "metar_sync" => s.metar_sync = b(v),
                 "metar_station" => s.metar_station = v.trim().chars().filter(|c| c.is_ascii_alphabetic()).take(4).collect::<String>().to_ascii_uppercase(),
                 "machine_translation" => s.machine_translation = b(v),
                 "ctrl_deadzone" => s.ctrl_deadzone = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 0.3)).unwrap_or(s.ctrl_deadzone),
+                "right_stick_look" => s.right_stick_look = b(v),
                 "reflections" | "envmap" => s.reflections = b(v),
                 "led_glow" => s.led_glow = v.trim().parse::<i32>().map(|x| x.clamp(0, 15) as u8).unwrap_or(s.led_glow),
                 "led_mips" => s.led_mips = v.trim().parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 4.0)).unwrap_or(s.led_mips),
@@ -541,18 +573,24 @@ impl Settings {
                 "red_steer_spd" => s.red_steer_spd = b(v),
                 "ff_invert" => s.ff_invert = b(v),
                 "ff_enabled" => s.ff_enabled = b(v),
+                "ff_road_vib" => s.ff_road_vib = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 4.0)).unwrap_or(s.ff_road_vib),
+                "ff_engine_vib" => s.ff_engine_vib = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 4.0)).unwrap_or(s.ff_engine_vib),
+                "ff_fade" => s.ff_fade = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 1.5)).unwrap_or(s.ff_fade),
                 "brake_hold" => s.brake_hold = b(v),
                 "mouse_steering" => s.mouse_steering = b(v),
                 "mouse_right_off" => s.mouse_right_off = b(v),
                 "mouse_smooth" => s.mouse_smooth = b(v),
                 "blinker_cancel" => s.blinker_cancel = b(v),
                 "look_sens" => s.look_sens = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.1, 2.0)).unwrap_or(s.look_sens),
+                "look_smoothing_ms" => s.look_smoothing_ms = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 200.0)).unwrap_or(s.look_smoothing_ms),
                 "wheel_range" => s.wheel_range = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(90.0, 2880.0)).unwrap_or(s.wheel_range),
                 "wheel_lock" => s.wheel_lock = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| if x < 45.0 { 0.0 } else { x.min(2880.0) }).unwrap_or(s.wheel_lock),
                 "camera_collision" => s.camera_collision = b(v),
                 "steer_look" => s.steer_look = b(v),
                 "steer_look_angle" => s.steer_look_angle = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 60.0)).unwrap_or(s.steer_look_angle),
                 "steer_look_response" => s.steer_look_response = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.05, 1.0)).unwrap_or(s.steer_look_response),
+                "head_idle" => s.head_idle = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.0, 1.0)).unwrap_or(s.head_idle),
+                "head_idle_pace" => s.head_idle_pace = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.5, 2.0)).unwrap_or(s.head_idle_pace),
                 "head_tracking" => s.head_tracking = b(v),
                 "head_tracking_invert" => s.head_tracking_invert = v.to_ascii_lowercase(),
                 "discord_status" => s.discord_status = b(v),
@@ -565,11 +603,13 @@ impl Settings {
                     let k = (k.as_bytes()[5] - b'x') as usize;
                     s.seat[k] = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(-1.5, 1.5)).unwrap_or(0.0);
                 }
+                "seat_pitch_deg" => s.seat_pitch_deg = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(-45.0, 45.0)).unwrap_or(s.seat_pitch_deg),
                 "fov" => s.fov = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| if x < 20.0 { 0.0 } else { x.min(120.0) }).unwrap_or(s.fov),
                 "mouse_sens" => s.mouse_sens = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.1, 3.0)).unwrap_or(s.mouse_sens),
                 "ui_scale_window" => s.ui_scale_window = b(v),
                 "notes" => s.notes = b(v),
                 "info_bar" => s.info_bar = b(v),
+                "chat_size" => s.chat_size = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.5, 3.0)).unwrap_or(s.chat_size),
                 "ui_scale" => s.ui_scale = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.5, 2.0)).unwrap_or(s.ui_scale),
                 "shadow_casters" => s.shadow_casters = if v.eq_ignore_ascii_case("omsi") { "omsi".into() } else { "all".into() },
                 "post_aa" => s.post_aa = if matches!(v.to_ascii_lowercase().as_str(), "off" | "0" | "none" | "false") { "off".into() } else { "fxaa".into() },
@@ -606,17 +646,19 @@ impl Settings {
             SETTINGS_VERSION, self.msaa, self.anisotropy, self.ssao as u8, self.shadows as u8, self.shadow_size, self.shadow_blobs as u8, self.navigator as u8, self.ui_opacity, self.navigator_corner, self.boarding, self.detail_textures as u8, self.exact_fare as u8, self.enhanced as u8, self.graphics, self.vr as u8, self.vr_scale, self.fullscreen as u8, self.vsync as u8, self.volume, self.drive_keys, self.post_aa, self.render_scale_text(), self.language, self.texture_compression as u8, self.texture_memory, self.auto_clutch as u8, self.momentary_gears as u8, self.min_obj_size, if self.max_obj_dist < 0.0 { "auto".to_string() } else { self.max_obj_dist.to_string() }, self.max_fps, self.chat as u8, self.tooltips as u8, self.name_tags as u8, self.show_fps as u8, self.clouds as u8, self.pax_density, self.vol_ai, self.vol_scenery, self.mirror_size, self.mirror_hud, self.mirror_refresh, self.doppler as u8, self.driver as u8, self.driverview_smooth as u8
         );
         text.push_str(&format!(
-            "vr_head_smoothing_ms={}\nvr_mirror_rate={}\nvr_desktop_mirror={}\nled_glow={}\nled_mips={}\nui_scale={}\nui_scale_window={}\nnotes={}\n",
-            self.vr_head_smoothing_ms, self.vr_mirror_rate, self.vr_desktop_mirror as u8, self.led_glow, self.led_mips, self.ui_scale, self.ui_scale_window as u8, self.notes as u8,
+            "vr_head_smoothing_ms={}\nvr_mirror_rate={}\nvr_desktop_mirror={}\nled_glow={}\nled_mips={}\nui_scale={}\nui_scale_window={}\nchat_size={}\nnotes={}\nff_road_vib={}\nff_engine_vib={}\nff_fade={}\n",
+            self.vr_head_smoothing_ms, self.vr_mirror_rate, self.vr_desktop_mirror as u8, self.led_glow, self.led_mips, self.ui_scale, self.ui_scale_window as u8, self.chat_size, self.notes as u8, self.ff_road_vib, self.ff_engine_vib, self.ff_fade,
         ));
         text.push_str(&format!(
             "triple_hud_center={}\ntriple_fov_deg={}\nfov={}\n",
             self.triple_hud_center as u8, self.triple.fov_deg, self.fov
         ));
         text.push_str(&format!("triple_screen={}\ntriple_span={}\ntriple_width_mm={}\ntriple_distance_mm={}\ntriple_bezel_mm={}\ntriple_left_angle_deg={}\ntriple_right_angle_deg={}\ntriple_eye_height_mm={}\n", self.triple.enabled as u8, self.triple_span as u8, self.triple.width_mm, self.triple.distance_mm, self.triple.bezel_mm, self.triple.left_angle_deg, self.triple.right_angle_deg, self.triple.eye_height_mm));
-        text.push_str(&format!("steer_look={}\nsteer_look_angle={}\nsteer_look_response={}\nlook_sens={}\nblinker_cancel={}\n", self.steer_look as u8, self.steer_look_angle, self.steer_look_response, self.look_sens, self.blinker_cancel as u8));
+        text.push_str(&format!("steer_look={}\nsteer_look_angle={}\nsteer_look_response={}\nhead_idle={}\nhead_idle_pace={}\nlook_sens={}\nlook_smoothing_ms={}\nblinker_cancel={}\n", self.steer_look as u8, self.steer_look_angle, self.steer_look_response, self.head_idle, self.head_idle_pace, self.look_sens, self.look_smoothing_ms, self.blinker_cancel as u8));
+        text.push_str(&format!("seat_pitch_deg={}\n", self.seat_pitch_deg));
         text.push_str(&format!("discord_status={}\ndiscord_app_id={}\n", self.discord_status as u8, self.discord_app_id));
         text.push_str(&format!("auto_shift={}\n", self.auto_shift as u8));
+        text.push_str(&format!("right_stick_look={}\n", self.right_stick_look as u8));
         text.push_str(&format!("voice_chat={}\n", self.voice_chat as u8));
         text
     }
@@ -795,6 +837,14 @@ mod tests {
     }
 
     #[test]
+    fn seat_pitch_round_trips_and_is_clamped() {
+        let settings = Settings { seat_pitch_deg: -12.0, ..Default::default() };
+        assert_eq!(Settings::from_text(&settings.to_text()), settings);
+        assert_eq!(Settings::from_text("seat_pitch_deg=NaN\n").seat_pitch_deg, 0.0);
+        assert_eq!(Settings::from_text("seat_pitch_deg=90\n").seat_pitch_deg, 45.0);
+    }
+
+    #[test]
     fn vr_mirror_rates_round_trip_including_every_frame() {
         for rate in [-1.0, 0.0, 16.0, 60.0, 120.0, 240.0, 360.0] {
             let s = Settings { vr_mirror_rate: rate, ..Default::default() };
@@ -840,6 +890,24 @@ mod tests {
         assert!(!off.render_options().fxaa);
         assert!(Settings::from_text("post_aa=FXAA").render_options().fxaa);
         assert_eq!(Settings::from_text(&off.to_text()), off);
+    }
+
+    #[test]
+    fn the_wheels_tremble_and_its_fade_out_survive_a_save() {
+        let d = Settings::default();
+        assert_eq!((d.ff_road_vib, d.ff_engine_vib, d.ff_fade), (1.0, 1.0, 0.28));
+        let s = Settings { ff_road_vib: 1.5, ff_engine_vib: 0.0, ff_fade: 0.5, ..Default::default() };
+        assert_eq!(Settings::from_text(&s.to_text()), s);
+        // what the file may hold is held between none and twice as much, and a fade of
+        // no more than a second - a number outside is brought back in rather than lost
+        let wild = Settings::from_text("ff_road_vib=9\nff_engine_vib=-3\nff_fade=12\n");
+        assert_eq!((wild.ff_road_vib, wild.ff_engine_vib, wild.ff_fade), (4.0, 0.0, 1.5));
+        // a file that says nothing keeps the wheel feeling as it did out of the box
+        let old = Settings::from_text("msaa=1\n");
+        assert_eq!((old.ff_road_vib, old.ff_engine_vib, old.ff_fade), (1.0, 1.0, 0.28));
+        // and one that says nonsense is left as it was
+        let bad = Settings::from_text("ff_road_vib=loud\nff_fade=\n");
+        assert_eq!((bad.ff_road_vib, bad.ff_fade), (1.0, 0.28));
     }
 }
 
@@ -964,5 +1032,18 @@ mod resolution_tests {
         assert_eq!(super::resolution_of("resolution=auto\n"), None);
         assert_eq!(super::resolution_of("window_size=1920*1080\n"), Some((1920, 1080)));
         assert_eq!(super::resolution_of("vsync=1\n"), None);
+    }
+}
+
+#[cfg(test)]
+mod right_stick_look_tests {
+    #[test]
+    fn existing_settings_keep_automatic_look_and_the_switch_round_trips() {
+        assert!(super::Settings::from_text("").right_stick_look);
+        for enabled in [false, true] {
+            let settings = super::Settings::from_text(&format!("right_stick_look={}\n", enabled as u8));
+            assert_eq!(settings.right_stick_look, enabled);
+            assert_eq!(super::Settings::from_text(&settings.to_text()).right_stick_look, enabled);
+        }
     }
 }

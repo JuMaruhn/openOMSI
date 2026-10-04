@@ -30,6 +30,7 @@ use std::sync::Arc;
 /// each and a minute of stutter after loading Spandau.
 pub const AI_SCHEMES: usize = 4;
 const SCRIPT_UPLOAD_BUDGET: usize = 4 << 20;
+const AI_JOB_SECS: f32 = 50e-6;
 
 /// Start a vehicle of type `ty` once and throw it away: its `{init}` and its displays read
 /// the files they need (depot data, fonts) into the caches before the first real one of the
@@ -226,6 +227,8 @@ pub struct AiCar {
     /// A rail vehicle: the track it has come along, (odometer, point), oldest first -
     /// where its rear bogie and its coupled cars and sections run (see `rail_behind`).
     pub rail_trail: std::collections::VecDeque<(f64, DVec3)>,
+    /// Seconds its body and script took last frame (heavy ones get an AI job of their own).
+    pub ai_secs: f32,
     /// A train turned round as a whole (its last car leads now): what a trip's
     /// `[trainreverse]` is compared with (Omsi.exe's vehicle +0x4e1).
     pub consist_reversed: bool,
@@ -697,18 +700,13 @@ pub fn vehicle_bodies(v: &VehicleInstance) -> Vec<omsi_sim::collision::Obb> {
     let mut out = vec![omsi_sim::collision::Obb::from_box(
         v.ty.def.bounding_box.unwrap_or(DEFAULT_BOX),
         v.position,
-        v.heading,
+        v.body_heading(),
     )];
     for t in &v.trailers {
-        let heading = if t.reversed {
-            t.heading + 180.0
-        } else {
-            t.heading
-        };
         out.push(omsi_sim::collision::Obb::from_box(
             t.ty.def.bounding_box.unwrap_or(DEFAULT_BOX),
             t.position,
-            heading,
+            t.body_heading(),
         ));
     }
     out
@@ -869,7 +867,7 @@ fn open_trace() -> Option<std::io::BufWriter<std::fs::File>> {
 /// The vehicle's extent from its origin: (to the front bumper, to the rear bumper, half
 /// the width) from its `[boundingbox]`.
 fn extents(ty: &VehicleType, length: f32) -> (f32, f32, f32) {
-    match ty.def.bounding_box {
+    let (front, rear, width) = match ty.def.bounding_box {
         Some(bb) if bb[1] > 1.0 => (
             bb[1] * 0.5 + bb[4],
             bb[1] * 0.5 - bb[4],
@@ -881,6 +879,11 @@ fn extents(ty: &VehicleType, length: f32) -> (f32, f32, f32) {
             Some((lo, hi)) if hi.y - lo.y > 1.0 => (hi.y.max(0.5), (-lo.y).max(0.5), (hi.x.max(-lo.x)).max(0.5)),
             _ => (length * 0.5, length * 0.5, 0.9),
         },
+    };
+    if omsi_sim::vehicle::body_reversed(&ty.def, false) {
+        (rear, front, width)
+    } else {
+        (front, rear, width)
     }
 }
 
@@ -2913,12 +2916,40 @@ impl Traffic {
             light_at: None,
             pull_out: 0.0,
             rail_trail: Default::default(),
+            ai_secs: 0.0,
             consist_reversed: false,
             park: None,
             seed,
             scheme,
         });
+        if kind != LaneKind::Air {
+            let i = self.cars.len() - 1;
+            if let Some(gap) = self.red_ahead(i) {
+                let st = &mut self.cars[i].state;
+                st.speed = st.speed.min((2.0 * st.decel * (gap - 1.0).max(0.0)).sqrt());
+            }
+        }
         id
+    }
+
+    fn red_ahead(&self, i: usize) -> Option<f32> {
+        let st = &self.cars[i].state;
+        let way = self.way_lanes(st, 200.0);
+        for (k, &(_, d)) in way.iter().enumerate().skip(1) {
+            if d > 150.0 {
+                break;
+            }
+            let Some((c, li)) = self.light_at_entry(&way, k) else {
+                continue;
+            };
+            let Some(ctl) = self.lights.get(c) else {
+                continue;
+            };
+            if !matches!(TrafficLightController::aspect(ctl.state(li)), Aspect::Green | Aspect::Dark) {
+                return Some(d - st.front);
+            }
+        }
+        None
     }
 
     /// The vehicle/paint sets the random traffic draws from.
@@ -4318,7 +4349,11 @@ impl Traffic {
                 }
                 // decided to go on yellow and too close to stop now, or past stopping at all
                 Aspect::Red | Aspect::RedYellow => {
-                    (amber == Some((c, li)) && gap < comfortable) || gap < possible - 0.5
+                    let go = (amber == Some((c, li)) && gap < comfortable) || gap < possible - 0.5;
+                    if !go && amber == Some((c, li)) {
+                        amber = None;
+                    }
+                    go
                 }
             };
             if !go {
@@ -4770,7 +4805,7 @@ impl Traffic {
                 if let Some(bb) = t.ty.def.bounding_box {
                     out.push(Footprint::from_obb(
                         i,
-                        &omsi_sim::collision::Obb::from_box(bb, t.position, t.heading),
+                        &omsi_sim::collision::Obb::from_box(bb, t.position, t.body_heading()),
                         st.speed,
                     ));
                 }
@@ -6152,22 +6187,29 @@ impl Traffic {
         {
             use rayon::prelude::*;
             let net = &self.net;
-            type Work<'a> = (&'a AiState, &'a mut AiBody, &'a mut VehicleInstance, &'a mut AiFrame, &'a mut std::collections::VecDeque<(f64, DVec3)>);
+            type Work<'a> = (&'a AiState, &'a mut AiBody, &'a mut VehicleInstance, &'a mut AiFrame, &'a mut std::collections::VecDeque<(f64, DVec3)>, &'a mut f32);
             let mut work: Vec<Work> = self
                 .cars
                 .iter_mut()
                 .zip(frames.iter_mut())
                 .filter_map(|(c, f)| {
                     let f = f.as_mut()?;
-                    Some((&c.state, &mut c.body, &mut c.vehicle, f, &mut c.rail_trail))
+                    Some((&c.state, &mut c.body, &mut c.vehicle, f, &mut c.rail_trail, &mut c.ai_secs))
                 })
                 .collect();
+            work.sort_by(|a, b| b.5.total_cmp(a.5));
+            let mut jobs: Vec<Vec<Work>> = Vec::new();
+            for w in work {
+                match jobs.last_mut() {
+                    Some(job) if *w.5 < AI_JOB_SECS && *job[0].5 < AI_JOB_SECS && job.len() < 4 => job.push(w),
+                    _ => jobs.push(vec![w]),
+                }
+            }
             let profile = omsi_cfg::env::var_os("OMSI_PROFILE").is_some();
             // (a few cars per job: every job handed out wakes a worker, and the waking cost
             // the main thread more than a car's work)
-            work.par_iter_mut()
-                .with_min_len(4)
-                .for_each(|(state, body, vehicle, frame, trail)| {
+            jobs.into_par_iter().flatten_iter()
+                .for_each(|(state, body, vehicle, frame, trail, secs)| {
                     let t0 = std::time::Instant::now();
                     let ground = vehicle.ground.clone();
                     let contact = vehicle.contact.clone();
@@ -6175,7 +6217,7 @@ impl Traffic {
                     if rail {
                         record_rail_trail(trail, state.odometer as f64, state.way_point(net, 0.0));
                     }
-                    let trail = &**trail;
+                    let trail = &*trail;
                     let behind = |d: f64| rail_behind(trail, state, net, d);
                     body.step(
                         dt,
@@ -6195,6 +6237,7 @@ impl Traffic {
                     frame.steer_deg = body.steer;
                     let t1 = std::time::Instant::now();
                     vehicle.update_ai(dt, frame);
+                    *secs = t0.elapsed().as_secs_f32();
                     if profile && t0.elapsed().as_secs_f64() > 0.01 {
                         log::info!(
                             "  slow AI frame: {} body {:.1} ms, scripts {:.1} ms",
@@ -6547,33 +6590,20 @@ impl Traffic {
         let mut bodies = vec![grown(omsi_sim::collision::Obb::from_box(
             ty.def.bounding_box.unwrap_or(DEFAULT_BOX),
             pos,
-            heading,
+            omsi_sim::vehicle::body_heading(&ty.def, heading, false),
         ))];
         let (mut origin, mut lead, mut lead_rev) = (pos, ty.clone(), false);
         for (t, rev) in self.trailer_chain(ty) {
-            let (back, front) = match omsi_sim::vehicle::coupling_offsets(&lead, lead_rev, &t, rev) {
-                Some((back, front)) => (back, front),
-                None => {
-                    // the declared joint, each end the one the part's own way names (as
-                    // `TrailerPart::new_ex` takes it): a part turned round couples by its
-                    // `[coupling_front]`, not by its `[coupling_back]`
-                    let cb = if lead_rev { lead.def.coupling_front.as_ref() } else { lead.def.coupling_back.as_ref() };
-                    let cf = if rev { t.def.coupling_back.as_ref() } else { t.def.coupling_front.as_ref() };
-                    (
-                        cb.map(|c| c.pos[1]).unwrap_or(if lead_rev { 4.0 } else { -4.0 }),
-                        cf.map(|c| c.pos[1]).unwrap_or(if rev { -4.0 } else { 4.0 }),
-                    )
-                }
-            };
+            let (back, front) = omsi_sim::vehicle::coupling_points(&lead, lead_rev, &t, rev);
             // each car stands along the consist's heading, turned round by its own
             // (absolute) orientation - never by the car in front of it
             let (center, car_heading) = omsi_sim::vehicle::coupling_placement(
                 origin,
                 heading,
-                lead_rev,
-                back,
-                rev,
-                front,
+                omsi_sim::vehicle::body_reversed(&lead.def, lead_rev),
+                back.y,
+                omsi_sim::vehicle::body_reversed(&t.def, rev),
+                front.y,
             );
             bodies.push(grown(omsi_sim::collision::Obb::from_box(
                 t.def.bounding_box.unwrap_or(DEFAULT_BOX),
@@ -6720,6 +6750,24 @@ impl Traffic {
         car.gone = true;
     }
 
+    /// Take all random AI cars off the road now, keeping timetable buses. Returns how many
+    /// vehicles were removed. The configured target is unchanged, so random traffic can
+    /// populate the roads again normally.
+    pub fn clear_random(&mut self, world: &World, renderer: &Renderer, scene: &mut Scene) -> usize {
+        let ids: Vec<u64> = self.cars.iter().filter(|c| !c.is_bus()).map(|c| c.id).collect();
+        let removed = ids.len();
+        for id in ids {
+            self.remove_car(world, renderer, scene, id);
+        }
+        removed
+    }
+
+    /// The AI on the roads: (cars, buses, cars asleep far from everybody, parked cars).
+    pub fn counts(&self) -> (usize, usize, usize, usize) {
+        let buses = self.cars.iter().filter(|c| c.is_bus()).count();
+        (self.cars.len() - buses, buses, self.dormant.len(), self.parked.values().map(Vec::len).sum())
+    }
+
     /// Take a car off the road now (the player took over its tour).
     pub fn remove_car(
         &mut self,
@@ -6759,12 +6807,12 @@ impl Traffic {
                 let (mass, id) = (c.vehicle.physics.mass_kg, c.id);
                 let rear = c.vehicle.trailers.iter().filter_map(move |t| {
                     t.ty.def.bounding_box.map(|bb| {
-                        omsi_sim::collision::Obb::from_box(bb, t.position, t.heading)
+                        omsi_sim::collision::Obb::from_box(bb, t.position, t.body_heading())
                             .moving(v, mass, id)
                     })
                 });
                 std::iter::once(
-                    omsi_sim::collision::Obb::from_box(bb, c.vehicle.position, c.vehicle.heading)
+                    omsi_sim::collision::Obb::from_box(bb, c.vehicle.position, c.vehicle.body_heading())
                         .moving(v, mass, id),
                 )
                 .chain(rear)
@@ -7041,6 +7089,21 @@ impl Traffic {
                         }
                     }
                 }
+            }
+            if !lamp.animated {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                (state, request).hash(&mut h);
+                if let Some(script) = lamp.script.as_ref() {
+                    for v in &script.lock().state.vars {
+                        v.to_bits().hash(&mut h);
+                    }
+                }
+                let sig = h.finish();
+                if lamp.shown == Some(sig) {
+                    continue;
+                }
+                lamp.shown = Some(sig);
             }
             // Traffic lamps do not enter World's ordinary scripted-object update path.
             // Switch their materials here too, so [matl_item] nightmaps light the LEDs.
@@ -7447,6 +7510,7 @@ impl Traffic {
             light_at: None,
             pull_out: 0.0,
             rail_trail: Default::default(),
+            ai_secs: 0.0,
             consist_reversed: false,
             park: None,
         });

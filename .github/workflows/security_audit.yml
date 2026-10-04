@@ -1,0 +1,35 @@
+# The crates in Cargo.lock against the RustSec advisory database: when the lock file changes,
+# and every Monday, since advisories are published for versions already in use. A crate with
+# a known vulnerability fails the run; unmaintained and yanked crates are only listed.
+name: Security audit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.lock
+      - "**/Cargo.toml"
+  pull_request:
+    paths:
+      - Cargo.lock
+      - "**/Cargo.toml"
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Audit Cargo.lock
+        run: cargo audit

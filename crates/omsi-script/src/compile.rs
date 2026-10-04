@@ -31,6 +31,7 @@ pub struct Block {
 #[derive(Debug, Clone, Default)]
 pub struct Program {
     pub var_names: Vec<String>,
+    pub strings: Vec<String>,
     pub str_var_names: Vec<String>,
     pub names: Vec<String>,
     pub curves: Vec<Curve>,
@@ -52,7 +53,7 @@ pub struct Program {
 
 impl Program {
     pub fn var(&self, name: &str) -> Option<VarId> {
-        self.var_index.get(&name.to_ascii_lowercase()).copied()
+        with_lower(name, |k| self.var_index.get(k).copied())
     }
     /// The name of a variable (lower case); a linear search, for diagnostics.
     pub fn var_name(&self, id: VarId) -> Option<&str> {
@@ -64,7 +65,7 @@ impl Program {
     }
 
     pub fn str_var(&self, name: &str) -> Option<StrVarId> {
-        self.str_var_index.get(&name.to_ascii_lowercase()).copied()
+        with_lower(name, |k| self.str_var_index.get(k).copied())
     }
 
     /// The string variable a `[texttexture]`'s first field names: either a script variable's
@@ -85,7 +86,7 @@ impl Program {
         &self.names[id as usize]
     }
     pub fn trigger(&self, name: &str) -> Option<BlockId> {
-        self.triggers.get(&name.to_ascii_lowercase()).copied()
+        with_lower(name, |k| self.triggers.get(k).copied())
     }
     /// Every input trigger a script set exposes, in stable order.  A vehicle mod is free to
     /// give its ignition and starter controls its own names; callers that need to discover a
@@ -96,11 +97,11 @@ impl Program {
         out
     }
     pub fn macro_block(&self, name: &str) -> Option<BlockId> {
-        self.macros.get(&name.to_ascii_lowercase()).copied()
+        with_lower(name, |k| self.macros.get(k).copied())
     }
     /// A `[const]` of the constfiles, as `(C.L.name)` reads it.
     pub fn constant(&self, name: &str) -> Option<f32> {
-        self.consts.get(&name.to_ascii_lowercase()).copied()
+        with_lower(name, |k| self.consts.get(k).copied())
     }
 
     /// Declare a variable (idempotent), returning its id.
@@ -117,7 +118,7 @@ impl Program {
 
     /// Whether variable `name` was declared in the script set's varlists (as opposed to built-in host variables).
     pub fn has_script_var(&self, name: &str) -> bool {
-        self.script_vars.contains(&name.to_ascii_lowercase())
+        with_lower(name, |k| self.script_vars.contains(k))
     }
 
     /// Declare a script variable (from a varlist), recording it in `script_vars` and returning its id.
@@ -258,7 +259,8 @@ impl Program {
         let mut out: Vec<String> = Vec::new();
         for b in &self.blocks {
             for w in b.ops.windows(2) {
-                if let (Op::PushStr(s), Op::Callback(n)) = (&w[0], &w[1]) {
+                if let (Op::PushStr(i), Op::Callback(n)) = (&w[0], &w[1]) {
+                    let s = &self.strings[*i as usize];
                     if self.name(*n).eq_ignore_ascii_case(callback) && !out.contains(s) {
                         out.push(s.clone());
                     }
@@ -598,7 +600,9 @@ impl<'a> Compiler<'a> {
                     }
                     Tok::Str(s) => {
                         if let Some((_, block, _)) = cur.as_mut() {
-                            block.ops.push(Op::PushStr(s));
+                            let i = self.p.strings.len() as u32;
+                            self.p.strings.push(s);
+                            block.ops.push(Op::PushStr(i));
                         }
                     }
                     Tok::Paren(inner) => {
@@ -713,7 +717,8 @@ impl<'a> Compiler<'a> {
                 Some(id) => Some(Op::LoadStr(id)),
                 None => {
                     self.err(file, line, format!("SC_ErrorInCommand_varinvalid: string variable \"{name}\" not found"));
-                    Some(Op::PushStr(String::new()))
+                    self.p.strings.push(String::new());
+                    Some(Op::PushStr(self.p.strings.len() as u32 - 1))
                 }
             },
             (b'S', b'$') => match self.p.str_var(&lname) {
@@ -949,3 +954,14 @@ mod tests {
     }
 }
 
+pub fn with_lower<R>(name: &str, f: impl FnOnce(&str) -> R) -> R {
+    let mut buf = [0u8; 64];
+    match buf.get_mut(..name.len()) {
+        Some(b) => {
+            b.copy_from_slice(name.as_bytes());
+            b.make_ascii_lowercase();
+            f(std::str::from_utf8(b).unwrap_or(name))
+        }
+        None => f(&name.to_ascii_lowercase()),
+    }
+}

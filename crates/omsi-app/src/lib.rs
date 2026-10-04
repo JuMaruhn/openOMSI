@@ -14,6 +14,7 @@ mod discord;
 #[cfg(steam)]
 mod steam;
 mod voice;
+mod head_idle;
 mod headtrack;
 #[cfg(windows)]
 mod openxr;
@@ -26,6 +27,8 @@ mod touch;
 mod placing;
 mod mt;
 mod updater;
+mod update_watch;
+mod presence;
 mod ambience;
 mod camera_arm;
 mod career;
@@ -74,6 +77,8 @@ mod controllers;
 mod ffb_calibration;
 #[cfg(windows)]
 mod dinput;
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+mod evdev_buttons;
 #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
 mod evdev_ff;
 mod cli;
@@ -422,6 +427,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
     let clock_note = args.clock_moved.clone();
     // (as the last session left it, #1164)
     let info_bar = settings.info_bar;
+    let is_server = args.server.is_some();
     // `--dev-vehicle`: the game opens as the workshop for a bus, the mode already on
     // (`crate::devmode`)
     let dev = args.dev_vehicle.then(crate::devmode::DevMode::started);
@@ -496,11 +502,14 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         speed: 30.0,
         mouse_look: false,
         buttons_held: (false, false),
+        mmb_held: false,
         both_drag: None,
+        f1_reset: None,
         vr_zoom_active: false,
         hover: None,
         hover_part: None,
         hover_hand: false,
+        head_idle_hold: Default::default(),
         input_script: parse_input_script(),
         shot: None,
         paused: false,
@@ -563,6 +572,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         html_object_pressed: None,
         drag_delta: (0.0, 0.0),
         look: (0.0, 0.0),
+        look_smooth: (0.0, 0.0),
         view_looks: Default::default(),
         look_view: String::new(),
         cam_blend: Default::default(),
@@ -572,6 +582,9 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         fps_t: Instant::now(),
         service_msg: clock_note.map(|m| (m, 10.0)),
         notices: Vec::new(),
+        update_watch: crate::update_watch::UpdateWatch::new(),
+        // (a server counts its players by their own games, not itself)
+        presence: if is_server { None } else { crate::presence::Presence::start() },
         log_state: Default::default(),
         plugins: None,
         career: Default::default(),

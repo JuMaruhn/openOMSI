@@ -600,9 +600,11 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
                 }
                 "seat_reset" if step => {
                     app.settings.seat = [0.0; 3];
+                    app.settings.seat_pitch_deg = 0.0;
                     for k in ["seat_x", "seat_y", "seat_z"] {
                         remember_setting(k, "0");
                     }
+                    remember_setting("seat_pitch_deg", "0");
                 }
                 "clock_ontime" if step => {
                     if app.lan.as_ref().is_some_and(|l| l.role == omsi_net::Role::Client) {
@@ -623,6 +625,9 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
                         let by = if verb == "clock_set" { secs - app.clock.time } else { secs };
                         app.shift_clock(by);
                     }
+                }
+                "traffic_clear" if step => {
+                    crate::admin::clear_ai_traffic(app);
                 }
                 other if step => {
                     app.page_action(other);
@@ -862,6 +867,7 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "led_glow" => (0..16).map(|v| v as f32).collect(),
         "led_mips" => (0..=80).map(|v| v as f32 * 0.05).collect(),
         "ui_scale" => (10..=40).map(|v| v as f32 * 0.05).collect(),
+        "chat_size" => (5..=30).map(|v| v as f32 * 0.1).collect(),
         "ui_opacity" => (4..=20).map(|v| v as f32 * 0.05).collect(),
         "vol_ai" | "vol_scenery" => (0..=20).map(|v| v as f32 * 0.05).collect(),
         "wheel_range" => (6..=60).map(|v| v as f32 * 30.0).collect(),
@@ -869,10 +875,14 @@ fn steps_of(verb: &str) -> Option<Vec<f32>> {
         "fov" => std::iter::once(0.0).chain((20..=120).map(|v| v as f32)).collect(),
         "steer_look_angle" => (0..=60).map(|v| v as f32).collect(),
         "steer_look_response" => (1..=20).map(|v| v as f32 * 0.05).collect(),
+        "head_idle" => (0..=20).map(|v| v as f32 * 0.05).collect(),
+        "head_idle_pace" => (10..=40).map(|v| v as f32 * 0.05).collect(),
         "pedal_t" | "pedal_b" => PEDAL.to_vec(),
         "mouse_sens" => (10..=300).map(|v| v as f32 / 100.0).collect(),
         "look_sens" => (2..=40).map(|v| v as f32 * 0.05).collect(),
+        "look_smoothing_ms" => (0..=20).map(|v| v as f32 * 10.0).collect(),
         "seat" => (-50..=50).map(|v| v as f32 / 100.0).collect(),
+        "seat_pitch" => (-45..=45).map(|v| v as f32).collect(),
         "hour" => (0..24).map(|v| v as f32).collect(),
         "minute" => (0..60).map(|v| v as f32).collect(),
         // the weather, made by hand
@@ -996,7 +1006,9 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         "pedal_b" => s.pedal_brake,
         "mouse_sens" => s.mouse_sens,
         "look_sens" => s.look_sens,
+        "look_smoothing_ms" => s.look_smoothing_ms,
         "ui_scale" => s.ui_scale,
+        "chat_size" => s.chat_size,
         "ui_opacity" => s.ui_opacity,
         "vol_ai" => s.vol_ai,
         "vol_scenery" => s.vol_scenery,
@@ -1017,7 +1029,10 @@ fn option_now(app: &App, verb: &str, arg: &str) -> Option<f32> {
         }
         "steer_look_angle" => s.steer_look_angle,
         "steer_look_response" => s.steer_look_response,
+        "head_idle" => s.head_idle,
+        "head_idle_pace" => s.head_idle_pace,
         "seat" => s.seat[arg.trim().parse::<usize>().unwrap_or(0).min(2)],
+        "seat_pitch" => s.seat_pitch_deg,
         "hour" => ((app.clock.time / 3600.0) as i64).rem_euclid(24) as f32,
         "minute" => (((app.clock.time / 60.0) as i64) % 60) as f32,
         "visibility" => app.weather.as_ref()?.fog.0,
@@ -1081,6 +1096,10 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
             app.settings.look_sens = (v * 100.0).round() / 100.0;
             Some(("look_sens", app.settings.look_sens.to_string()))
         }
+        "look_smoothing_ms" => {
+            app.settings.look_smoothing_ms = v.round();
+            Some(("look_smoothing_ms", app.settings.look_smoothing_ms.to_string()))
+        }
         "mouse_sens" => {
             app.settings.mouse_sens = (v * 100.0).round() / 100.0;
             Some(("mouse_sens", app.settings.mouse_sens.to_string()))
@@ -1088,6 +1107,10 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
         "ui_scale" => {
             app.settings.ui_scale = (v * 100.0).round() / 100.0;
             Some(("ui_scale", app.settings.ui_scale.to_string()))
+        }
+        "chat_size" => {
+            app.settings.chat_size = ((v * 10.0).round() / 10.0).clamp(0.5, 3.0);
+            Some(("chat_size", app.settings.chat_size.to_string()))
         }
         "ui_opacity" => {
             app.settings.ui_opacity = (v * 100.0).round() / 100.0;
@@ -1156,10 +1179,22 @@ fn option_set(app: &mut App, verb: &str, arg: &str, v: f32) -> Option<(&'static 
             app.settings.steer_look_response = (v * 100.0).round() / 100.0;
             Some(("steer_look_response", app.settings.steer_look_response.to_string()))
         }
+        "head_idle" => {
+            app.settings.head_idle = (v * 100.0).round() / 100.0;
+            Some(("head_idle", app.settings.head_idle.to_string()))
+        }
+        "head_idle_pace" => {
+            app.settings.head_idle_pace = (v * 100.0).round() / 100.0;
+            Some(("head_idle_pace", app.settings.head_idle_pace.to_string()))
+        }
         "seat" => {
             let k: usize = arg.trim().parse().unwrap_or(0).min(2);
             app.settings.seat[k] = (v * 100.0).round() / 100.0;
             Some((["seat_x", "seat_y", "seat_z"][k], app.settings.seat[k].to_string()))
+        }
+        "seat_pitch" => {
+            app.settings.seat_pitch_deg = v.clamp(-45.0, 45.0).round();
+            Some(("seat_pitch_deg", app.settings.seat_pitch_deg.to_string()))
         }
         // the clock set directly: the hour or the minute (the seconds stay)
         "hour" | "minute" => {
@@ -1255,6 +1290,7 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "texture_compression" => s.texture_compression,
         "driver" => s.driver,
         "alt_view" => s.alt_view,
+        "precision_zoom" => s.precision_zoom,
         "triple_screen" => s.triple.enabled,
         "triple_hud_center" => s.triple_hud_center,
         "triple_span" => s.triple_span,
@@ -1469,6 +1505,10 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
         "alt_view" => {
             app.settings.alt_view = on;
             Some(("alt_view", bit))
+        }
+        "precision_zoom" => {
+            app.settings.precision_zoom = on;
+            Some(("precision_zoom", bit))
         }
         "triple_screen" => {
             app.settings.triple.enabled = on;
@@ -2068,15 +2108,20 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "steer_look", "View turns with steering", "Camera turns with the steering wheel (cockpit only)"),
         slider_row(app, "steer_look_angle", "Steering view angle", "How far the view turns at full steering lock", &|v| format!("{v:.0}°")),
         slider_row(app, "steer_look_response", "Steering view response", "How quickly the view follows the steering", &|v| format!("{:.0} ms", v * 1000.0)),
+        slider_row(app, "head_idle", "Head sway at a standstill", "How much the view sways on its own when nothing is done to it - a head at rest is never quite still, most of it seen while the bus waits at a stop", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{:.0}%", v * 100.0) }),
+        slider_row(app, "head_idle_pace", "Sway pace", "How fast that sway moves (100% is the pace it is designed at)", &|v| format!("{:.0}%", v * 100.0)),
         switch_row(app, "hands_in_cab", "Driver's hands in the cab view", "Shows the driver's hand on the steering wheel (Cockpit only)"),
         switch_row(app, "driver", "Driver at the wheel (outside views)", "Shows the driver in the outside views and in the mirrors"),
         switch_row(app, "headtrack", "Head tracking", &format!("Head tracking with opentrack (UDP port {})", s.head_tracking_port)),
         slider_row(app, "look_sens", "Mouse look sensitivity", "How fast the view turns when looking round with the mouse (100% is OMSI's)", &pct),
+        slider_row(app, "look_smoothing_ms", "Smooth the mouse look", "How long the view takes to come round to where the mouse or the stick turned it (off: at once, as OMSI)", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{v:.0} ms") }),
         switch_row(app, "alt_view", "Right mouse button turns the view", "Shift+right zooms; off: right zooms as in OMSI, the wheel button turns"),
+        switch_row(app, "precision_zoom", "Precision mouse zoom", "The mouse zoom follows the FOV curve instead of OMSI's linear way"),
         slider_row(app, "fov", "Field of view", "Vertical field of view; in triple screen Default uses physical measurements, an override moves the virtual eye", &|v| if v < 20.0 { "Default".to_string() } else { format!("{v:.0}°") }),
         slider_row(app, "seat 1", "Seat forward and back", "Adjust the driver's seat position forward or backward", &cm),
         slider_row(app, "seat 2", "Seat height", "Adjust the driver's seat height", &cm),
         slider_row(app, "seat 0", "Seat left and right", "Adjust the driver's seat position from side to side", &cm),
+        slider_row(app, "seat_pitch", "Head pitch", "Set the driver's neutral head tilt up or down, independent of the display setup", &|v| format!("{v:+.0}°")),
     ]
         .into_iter()
         .flatten()
@@ -2128,6 +2173,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "tooltips", "Name of the button under the mouse", "Shows the name of what the cursor points at"),
         switch_row(app, "notes", "Notes in the top-left corner", "Why the vehicle does not move, the change due, what a service did"),
         switch_row(app, "chat", "Chat in online games", "Shows the chat of a LAN session"),
+        slider_row(app, "chat_size", "Chat size", "The chat's texts on top of the interface size (also Ctrl + the mouse wheel over the chat)", &pct),
         switch_row(app, "name_tags", "Other players' names above their buses", "Shows the names of the other players"),
         Some(opens("Reset all settings...", "Everything but the language, the key bindings and the game folder goes back to how it came", "reset")),
     ]
@@ -2285,6 +2331,9 @@ fn world_pages(app: &App) -> Vec<Page> {
     }
     let mut people: Vec<(String, String)> = Vec::new();
     people.extend(slider_row(app, "traffic", "Traffic", "How many vehicles drive around the map.", &|v| format!("{} vehicles", v as i64)));
+    if !client && app.traffic.is_some() {
+        people.push(button("Clear AI traffic", "Clear", "Remove the current AI cars from the road; random traffic will return automatically.", "traffic_clear"));
+    }
     people.extend(slider_row(app, "pax", "Passengers", "How many passengers wait at the stops and ride.", &pct));
     vec![("Time", time), ("Weather", weather), ("Temperature and wind", climate), ("Traffic and people", people), ("Tools", tools)]
 }

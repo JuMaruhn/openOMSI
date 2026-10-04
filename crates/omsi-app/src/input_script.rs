@@ -121,6 +121,13 @@ impl App {
                 }
                 return;
             }
+            if self.mirror_hud.editing() && matches!(code, KeyCode::BracketLeft | KeyCode::BracketRight | KeyCode::Semicolon | KeyCode::Quote) {
+                if pressed {
+                    let size = self.hud_size();
+                    self.mirror_hud.size_key(code, self.hud_cursor(), size);
+                }
+                return;
+            }
             if self.mirror_hud.editing() && matches!(code, KeyCode::Insert | KeyCode::Delete | KeyCode::Backspace | KeyCode::KeyC | KeyCode::Escape) {
                 if pressed && !repeat {
                     let size = self.hud_size();
@@ -827,7 +834,12 @@ impl App {
     /// the first time).
     pub(crate) fn sync_view_look(&mut self) {
         let key = self.look_key();
-        swap_view_look(&mut self.look, &mut self.view_looks, &mut self.look_view, &key);
+        // A change of view is not a turn of the head: the direction of the view entered is
+        // where the head already is, so the angle the camera is drawn at starts there as
+        // well (a glide belongs between angles of one and the same view).
+        if swap_view_look(&mut self.look, &mut self.view_looks, &mut self.look_view, &key) {
+            self.look_smooth = self.look;
+        }
     }
 
     /// Which camera the look belongs to: the view, and for the driver's and the passengers'
@@ -840,12 +852,16 @@ impl App {
 
     /// Zoom the view inside the bus by `notches` of the mouse wheel (in: positive).
     pub(crate) fn zoom_by(&mut self, notches: f32) {
+        // a hand on the zoom cancels an eased Space return.
+        self.f1_reset = None;
         let z = self.view_zoom.entry(self.view.clone()).or_insert(1.0);
         *z = (*z * (1.0 - 0.08 * notches.clamp(-5.0, 5.0))).clamp(0.2, 1.6);
     }
 
     pub(crate) fn look_by(&mut self, dx: f32, dy: f32) {
         self.sync_view_look();
+        // a hand on the view cancels an eased Space return.
+        self.f1_reset = None;
         if self.view == "foot" {
             self.foot_look(dx, dy);
             return;
@@ -1116,6 +1132,8 @@ impl App {
             return false;
         }
         if let Some((y0, v0)) = self.both_drag {
+            // a hand on the zoom cancels an eased Space return.
+            self.f1_reset = None;
             // (0x82c5f8: outside, the distance at the press times 1 + the way up over 500
             // pixels; in the bus the field of view at the press plus the way up over 500
             // pixels times the camera's own, which is also its widest (+0x31c, 0x7edde4):
@@ -1123,6 +1141,18 @@ impl App {
             if self.view == "outside" {
                 let k = (1.0 + (y0 - y) / 500.0).max(0.05);
                 self.orbit = (v0 * k).clamp(ORBIT_MIN, ORBIT_MAX);
+            } else if self.settings.precision_zoom {
+                // precision zoom from the press anchor (drag down zooms in):
+                // the FOV-multiplier curve instead of the linear way, same
+                // floor. Past the authored field of view it stays linear.
+                let intent = if self.view == "driver" { ZOOM_INTENT_F1 } else { ZOOM_INTENT };
+                let dy = y - y0;
+                let m = if v0 > 1.0 {
+                    (v0 - dy / 500.0).clamp(0.2, v0.max(1.0))
+                } else {
+                    precision_zoom_step(v0, dy, intent).clamp(0.2, 1.0)
+                };
+                self.view_zoom.insert(self.view.clone(), m);
             } else {
                 self.view_zoom.insert(self.view.clone(), (v0 + (y0 - y) / 500.0).clamp(0.2, 1.0_f32.max(v0)));
             }
@@ -1712,7 +1742,7 @@ impl App {
                 }
                 // `shot <file>`: the window's own view into a PNG, drawn from the scene the
                 // window is showing (the only way to see what the window path renders)
-                "shot" => self.shot = Some(PathBuf::from(arg)),
+                "shot" => self.shot = Some((PathBuf::from(arg), true)),
                 // `dumptex <folder>`: the player's display pictures as the window has them
                 "dumptex" => {
                     if let Some(p) = self.player.as_ref() {
@@ -3699,20 +3729,52 @@ impl App {
             // (Omsi.exe's camera reset, 0x7edde4, puts back the field of view with the
             // direction: the zoom goes as well, #244)
             "view_reset_direction" => {
-                self.look = (0.0, 0.0);
-                self.view_zoom.remove(&self.view);
+                // F1 eases home (look + zoom glide) from the values in place:
+                // zeroing them first would flash a frame of the destination.
+                if self.view == "driver"
+                    && self.settings.driverview_smooth
+                    && (self.look != (0.0, 0.0) || self.view_zoom.contains_key(&self.view))
+                {
+                    let zoom = self.view_zoom.get(&self.view).copied().unwrap_or(1.0);
+                    let key = self.look_key();
+                    self.f1_reset = Some((self.look, zoom, 0.0, key));
+                } else {
+                    self.f1_reset = None;
+                    self.look = (0.0, 0.0);
+                    self.view_zoom.remove(&self.view);
+                }
                 #[cfg(windows)]
                 if let Some(vr) = self.vr.as_mut() { vr.recenter(); }
             }
             // (Space in Inputs/keyboard.cfg: every view looks ahead again, and back to the
             // standard camera - "center")
             "view_reset_all_directions" => {
-                self.look = (0.0, 0.0);
-                self.view_looks.clear();
-                self.view_zoom.clear();
-                self.orbit = ORBIT_DEFAULT;
+                // F1 eases home (look + zoom glide) from the values in place:
+                // zeroing them first would flash a frame of the destination.
+                // Everything else snaps. The glide belongs to the standard
+                // camera (cam reset first), so a mid-glide switch finalizes it.
+                let zoom = self.view_zoom.get(&self.view).copied().unwrap_or(1.0);
+                let eyed = self.view == "driver"
+                    && self.settings.driverview_smooth
+                    && (self.look != (0.0, 0.0) || self.view_zoom.contains_key(&self.view));
                 if let Some(p) = self.player.as_mut() {
                     p.cam_choice = (0, 0);
+                }
+                self.orbit = ORBIT_DEFAULT;
+                if eyed {
+                    self.view_looks.clear();
+                    self.view_zoom.retain(|k, _| k == "driver");
+                    let key = self.look_key();
+                    self.f1_reset = Some((self.look, zoom, 0.0, key));
+                    // the bookkeeping follows the camera change at once: left
+                    // stale, the next swap would write the old look straight
+                    // back into the previous camera's slot.
+                    self.look_view = self.look_key();
+                } else {
+                    self.f1_reset = None;
+                    self.look = (0.0, 0.0);
+                    self.view_looks.clear();
+                    self.view_zoom.clear();
                 }
             }
             // the next (or the previous) view mode, driver - passenger - outside - map and
@@ -3814,6 +3876,12 @@ impl App {
     /// the cursor for the first second.
     pub(crate) fn set_mouse_drive(&mut self, on: bool) {
         self.mouse_drive = on;
+        if on {
+            // O can be pressed while the pointer is anywhere in the window. Start mouse
+            // steering from the neutral cursor position instead of applying that offset
+            // to the wheel on the first frame.
+            self.center_cursor = true;
+        }
         if !on {
             crate::player::keep_wheel(self.player.as_mut());
             // the brake the mouse held stays on, as the brake key leaves it (OMSI has one
@@ -4045,7 +4113,7 @@ impl App {
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let path = dir.join(format!("omsi_{secs}.png"));
         self.service_msg = Some((format!("Screenshot: {}", path.display()), 4.0));
-        self.shot = Some(path);
+        self.shot = Some((path, false));
     }
 
     /// On foot, the own bus is within reach: inside it, or standing by it (a hand's reach
@@ -4197,7 +4265,17 @@ impl App {
         // (steering with the mouse: a cross, as OMSI shows it; turning the view with the
         // right button held: the four arrows OMSI shows then, #185)
         // (zooming with the mouse: the up-down arrows, Omsi's crSizeNS)
+        // SIZENS only while the right button really zooms (with `alt_view`
+        // it turns the view instead, and keeps the four arrows).
+        let rmb_zoom = self.buttons_held.1
+            && !self.mmb_held
+            && !self.settings.alt_view
+            && self.player.is_some()
+            && self.both_drag.is_none()
+            && matches!(self.view.as_str(), "driver" | "outside" | "pax" | "free");
         let kind: u8 = if self.both_drag.is_some() && self.game_menu.is_none() {
+            4
+        } else if rmb_zoom && self.game_menu.is_none() {
             4
         } else if self.mouse_look && self.game_menu.is_none() {
             3
@@ -4324,6 +4402,38 @@ pub(crate) fn chase_orbit_step(yaw: f32, pitch: f32, dx_px: f32, dy_px: f32) -> 
     )
 }
 
+/// Precision zoom step from a vertical drag: the zoom state `z` (0 wide ..
+/// 1 full zoom) travels at `intent` per 364 px, and the FOV multiplier is
+/// `1/(1+5.5*z)` — full zoom ~6.5x in. Drag down (`dy > 0`) zooms in.
+/// Never past 1.0 (never wider than the bus's own field of view); the floor
+/// is the caller's clamp. Pure (tested below).
+pub(crate) fn precision_zoom_step(mult: f32, dy_px: f32, intent: f32) -> f32 {
+    const RANGE: f32 = 5.5;
+    const FULL_DRAG_PX: f32 = 364.0;
+    let z = ((1.0 / mult.max(0.154) - 1.0) / RANGE).clamp(0.0, 1.0);
+    let z2 = (z + dy_px * intent / FULL_DRAG_PX).clamp(0.0, 1.0);
+    1.0 / (1.0 + RANGE * z2)
+}
+
+/// F1 zoom intent: the head zoom runs 20% slower than outside/free.
+pub(crate) const ZOOM_INTENT_F1: f32 = 0.56;
+/// Outside/free zoom intent: a full 364 px drag takes `z` 0 to 0.70.
+pub(crate) const ZOOM_INTENT: f32 = 0.70;
+
+/// Eased Space return for the F1 head: look and zoom glide home on the same
+/// ease-out as the viewpoint switch instead of teleporting. `t` seconds in;
+/// returns the current look, zoom and done. Pure (tested below).
+pub(crate) fn reset_blend(look_from: (f32, f32), zoom_from: f32, t: f32) -> ((f32, f32), f32, bool) {
+    let x = (t / crate::app::CAM_BLEND_SECS).clamp(0.0, 1.0);
+    let u = 1.0 - x;
+    let s = 1.0 - u * u * u;
+    (
+        (look_from.0 * (1.0 - s), look_from.1 * (1.0 - s)),
+        zoom_from + (1.0 - zoom_from) * s,
+        x >= 1.0,
+    )
+}
+
 #[cfg(test)]
 mod gear_lever_tests {
     /// The stock cars' gates keep the gear in `antrieb_getr_gang` (#866).
@@ -4390,6 +4500,33 @@ mod look_tests {
         // pitch never leaves the stops, whichever way it is dragged.
         assert_eq!(super::chase_orbit_step(0.0, 0.0, 0.0, -1000.0).1, 25.0);
         assert_eq!(super::chase_orbit_step(0.0, 0.0, 0.0, 1000.0).1, -60.0);
+    }
+
+    #[test]
+    fn space_return_eases_home_like_the_viewpoint_switch() {
+        // start: untouched; partway: well on the way (ease-out); end: exact and done.
+        let (look, zoom, done) = super::reset_blend((30.0, -10.0), 0.5, 0.0);
+        assert_eq!((look, zoom, done), ((30.0, -10.0), 0.5, false));
+        let (look, zoom, done) = super::reset_blend((30.0, -10.0), 0.5, 0.27);
+        assert!(look.0 > 3.0 && look.0 < 27.0 && zoom > 0.5 && zoom < 1.0 && !done);
+        let (look, zoom, done) = super::reset_blend((30.0, -10.0), 0.5, 0.54);
+        assert_eq!((look, zoom, done), ((0.0, 0.0), 1.0, true));
+        assert!(super::reset_blend((30.0, -10.0), 0.5, 5.0).2);
+    }
+
+    #[test]
+    fn precision_zoom_follows_the_fov_curve_and_never_widens() {
+        // a full 364 px drag down takes z 0 to 0.70: m = 1/(1+5.5*0.70).
+        let m = super::precision_zoom_step(1.0, 364.0, super::ZOOM_INTENT);
+        assert!((m - 1.0 / (1.0 + 5.5 * 0.70)).abs() < 1e-4, "{m}");
+        // drag down zooms in, drag up undoes it, never past 1.0.
+        let mid = super::precision_zoom_step(1.0, 100.0, super::ZOOM_INTENT);
+        assert!(mid < 1.0 && mid > 0.45, "{mid}");
+        assert!((super::precision_zoom_step(mid, -100.0, super::ZOOM_INTENT) - 1.0).abs() < 1e-4);
+        assert_eq!(super::precision_zoom_step(1.0, -50.0, super::ZOOM_INTENT), 1.0);
+        // F1 runs the same curve 20% slower.
+        let slow = super::precision_zoom_step(1.0, 100.0, super::ZOOM_INTENT_F1);
+        assert!(slow > mid && slow < 1.0, "{slow} vs {mid}");
     }
 }
 
@@ -4620,13 +4757,98 @@ pub(crate) fn cab_look_yaw(yaw: f32) -> f32 {
     (yaw + 180.0).rem_euclid(360.0) - 180.0
 }
 
-pub(crate) fn swap_view_look(look: &mut (f32, f32), looks: &mut std::collections::HashMap<String, (f32, f32)>, look_view: &mut String, view: &str) {
-    if look_view != view {
-        let old = std::mem::replace(look_view, view.to_string());
-        if !old.is_empty() {
-            looks.insert(old, *look);
+/// Put the direction of the view left away and take up the one of the view entered; `true`
+/// when that was another view (the caller then knows the head did not just move: it is where
+/// the view entered last left it).
+pub(crate) fn swap_view_look(look: &mut (f32, f32), looks: &mut std::collections::HashMap<String, (f32, f32)>, look_view: &mut String, view: &str) -> bool {
+    if look_view == view {
+        return false;
+    }
+    let old = std::mem::replace(look_view, view.to_string());
+    if !old.is_empty() {
+        looks.insert(old, *look);
+    }
+    *look = looks.get(view).copied().unwrap_or((0.0, 0.0));
+    true
+}
+
+/// Ease the angle the view is drawn at out of the head's own angle, once a frame, and give it
+/// back: `shown` keeps the angle of the frame before, `ms` is the time constant
+/// (`look_smoothing_ms`, 0 = the view is drawn where the head points at once).
+///
+/// The step is `1 - e^(-dt/tau)`, so 30 and 300 frames a second smooth alike (a plain
+/// fraction of the way would smooth the faster machine harder) and the yaw goes the short way
+/// round. Off, the angle is taken over at once, which is also what puts the view back in step
+/// after a change of view or a `look` a script set whole.
+///
+/// A free function: it is called where `self` is borrowed in parts, and needs nothing of the
+/// app but the two angles.
+pub(crate) fn ease_look(shown: &mut (f32, f32), wanted: (f32, f32), dt: f32, ms: f32) -> (f32, f32) {
+    let tau = ms * 0.001;
+    if !(tau > 0.0) || !dt.is_finite() || dt <= 0.0 {
+        *shown = wanted;
+        return wanted;
+    }
+    let f = 1.0 - (-dt / tau).exp();
+    let dyaw = (wanted.0 - shown.0 + 180.0).rem_euclid(360.0) - 180.0;
+    // (in the range the head's yaw is kept in: -180..180 in the cab, `cab_look_yaw`, else
+    // 0..360 - a glide across the back would otherwise hand the cab a yaw of 350)
+    let yaw = shown.0 + dyaw * f;
+    shown.0 = if (-180.0..=180.0).contains(&wanted.0) { (yaw + 180.0).rem_euclid(360.0) - 180.0 } else { yaw.rem_euclid(360.0) };
+    shown.1 += (wanted.1 - shown.1) * f;
+    *shown
+}
+
+#[cfg(test)]
+mod look_smoothing_tests {
+    use super::ease_look;
+
+    /// A cab's yaw (-180..180) eased across the back stays in its range: from 170 to -170 it
+    /// goes through 180, not out to 190 or round to 350.
+    #[test]
+    fn a_cab_yaw_stays_within_half_a_turn() {
+        let mut shown = (170.0, 0.0);
+        for _ in 0..30 {
+            let (yaw, _) = ease_look(&mut shown, (-170.0, 0.0), 1.0 / 60.0, 100.0);
+            assert!((-180.0..=180.0).contains(&yaw), "{yaw}");
+            assert!(yaw >= 170.0 || yaw <= -170.0, "the short way round: {yaw}");
         }
-        *look = looks.get(view).copied().unwrap_or((0.0, 0.0));
+    }
+
+    /// The step is `1 - e^(-dt/tau)`: a machine drawing 600 frames a second glides exactly
+    /// as far in a second as one drawing 60 (a plain fraction of the way would smooth the
+    /// faster of the two harder, and the same setting would feel different on a faster PC).
+    #[test]
+    fn the_glide_does_not_depend_on_the_frame_rate() {
+        let (from, to) = ((0.0, 0.0), (30.0, 10.0));
+        let mut slow = from;
+        for _ in 0..60 {
+            ease_look(&mut slow, to, 1.0 / 60.0, 100.0);
+        }
+        let mut fast = from;
+        for _ in 0..600 {
+            ease_look(&mut fast, to, 1.0 / 600.0, 100.0);
+        }
+        assert!((slow.0 - fast.0).abs() < 0.01 && (slow.1 - fast.1).abs() < 0.01, "{slow:?} against {fast:?}");
+        // a whole second at a time constant of 100 ms is very nearly there
+        assert!(slow.0 > 29.9 && slow.1 > 9.9, "{slow:?}");
+    }
+
+    /// A head turned a degree past north eases a degree forward, not 359 back.
+    #[test]
+    fn the_glide_goes_the_short_way_round() {
+        let mut shown = (359.0, 0.0);
+        let there = ease_look(&mut shown, (1.0, 0.0), 0.05, 100.0);
+        assert!((there.0 - 359.0).rem_euclid(360.0) < 1.0, "{there:?}");
+    }
+
+    /// Off, the view is drawn exactly where the head points, at once: what every machine
+    /// had before this was a setting.
+    #[test]
+    fn without_the_setting_the_view_is_where_the_head_points() {
+        let mut shown = (0.0, 0.0);
+        assert_eq!(ease_look(&mut shown, (30.0, 10.0), 1.0 / 60.0, 0.0), (30.0, 10.0));
+        assert_eq!(shown, (30.0, 10.0));
     }
 }
 

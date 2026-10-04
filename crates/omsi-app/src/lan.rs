@@ -112,6 +112,38 @@ fn engine_fed(name: &str) -> bool {
         || matches!(n.as_str(), "n_wheel" | "wetness" | "time" | "timegap")
 }
 
+/// Every variable of a vehicle type that goes to the others (`omsi_net::vars`): the
+/// variables its own varlists declare - not those every copy works out for itself
+/// (`engine_fed`), nor the engine's own (the view, the weather) - and all its strings, by
+/// their ids, with a hash of their names that tells two copies made from the same files.
+pub struct VarTable {
+    pub hash: u32,
+    pub floats: Vec<u16>,
+    pub strings: Vec<u16>,
+}
+
+fn var_table(program: &omsi_script::Program) -> VarTable {
+    let mut h: u32 = 0x811c_9dc5;
+    let mut eat = |s: &str| {
+        for b in s.bytes().chain(std::iter::once(0)) {
+            h = (h ^ b.to_ascii_lowercase() as u32).wrapping_mul(0x0100_0193);
+        }
+    };
+    let mut floats = Vec::new();
+    for (k, n) in program.var_names.iter().enumerate().take(u16::MAX as usize) {
+        if program.script_vars.contains(&n.to_ascii_lowercase()) && !engine_fed(n) {
+            eat(n);
+            floats.push(k as u16);
+        }
+    }
+    let mut strings = Vec::new();
+    for (k, n) in program.str_var_names.iter().enumerate().take(u16::MAX as usize) {
+        eat(n);
+        strings.push(k as u16);
+    }
+    VarTable { hash: h, floats, strings }
+}
+
 /// Sound entries of the full `[sound]` set that are heard from outside as well: the horn,
 /// the indicator relay, kneeling.
 fn outside_entry(e: &omsi_vehicle::SoundEntry) -> bool {
@@ -464,12 +496,24 @@ pub struct RemoteVehicle {
     offset: Option<f64>,
     /// The moment of theirs drawn (see `PlayClock`).
     play: crate::lan_world::PlayClock,
+    /// Every variable of theirs as it came (`omsi_net::vars`), pinned each frame, and their
+    /// strings - for the same vehicle files only (`vars`' hash); and the variables the pose
+    /// already carries, which glide instead (lamps, switches, moving parts, doors).
+    vars: Option<VarTable>,
+    synced: hashbrown::HashMap<u16, f32>,
+    synced_strings: hashbrown::HashMap<u16, String>,
+    smooth: hashbrown::HashSet<u16>,
 }
 
 impl RemoteVehicle {
     /// The LAN player's vehicle as it is drawn here.
     pub fn vehicle(&self) -> &omsi_sim::VehicleInstance {
         &self.vehicle
+    }
+
+    /// The same, for the plugins (`omsi.set_other_var`: their next state writes it again).
+    pub fn vehicle_mut(&mut self) -> &mut omsi_sim::VehicleInstance {
+        &mut self.vehicle
     }
 }
 
@@ -576,6 +620,9 @@ pub struct LanGame {
     /// tried: tried again only after a while (every frame, a server read a big add-on bus
     /// it could not load over and over and stood still for everybody).
     failed: hashbrown::HashMap<(u32, String), std::time::Instant>,
+    /// Our vehicle's variable table (by its program), for `omsi_net::vars`.
+    my_vars: Option<(usize, Arc<VarTable>)>,
+    vars_log: f32,
 }
 
 /// What the frame knows that LAN play needs.
@@ -933,6 +980,17 @@ pub fn update_server_info(players: usize, time: &str, weather: &str) {
                 if !weather.is_empty() {
                     i.weather = weather.to_string();
                 }
+            }
+        }
+    }
+}
+
+/// A server run: its shared world now, for `GET /status`.
+pub fn update_server_world(world: omsi_net::ws::WorldCounts) {
+    if let Ok(w) = WS_PATH.lock() {
+        if let Some(g) = w.as_ref().and_then(|w| w.gateway.as_ref()) {
+            if let Ok(mut i) = g.info.lock() {
+                i.world = Some(world);
             }
         }
     }
@@ -2415,9 +2473,7 @@ fn remote_type(
     player: Option<&Player>,
 ) -> Option<(Arc<omsi_sim::VehicleType>, bool)> {
     let allowed = crate::server::SERVER_VEHICLES.get().filter(|l| !l.is_empty());
-    let norm = |s: &str| s.trim().replace('\\', "/").to_ascii_lowercase();
-    let listed = allowed.map(|l| l.iter().any(|v| norm(v) == norm(&pose.bus) || norm(&pose.bus).ends_with(&norm(v)))).unwrap_or(true);
-    let loaded = if listed {
+    let loaded = if allowed.is_none_or(|l| crate::server::allows(l, &pose.bus)) {
         remote_bus_file(args, &pose.bus).and_then(|path| omsi_sim::VehicleType::load(&args.root, &path).map_err(|e| e.to_string()))
     } else {
         Err("the server does not offer it".to_string())
@@ -2560,6 +2616,10 @@ fn new_remote(
         samples: std::collections::VecDeque::new(),
         offset: None,
         play: Default::default(),
+        vars: None,
+        synced: Default::default(),
+        synced_strings: Default::default(),
+        smooth: Default::default(),
     })
 }
 
@@ -2905,8 +2965,78 @@ fn drive_remote(rv: &mut RemoteVehicle, pose: &Pose, dt: f32, exact: bool) {
         at_station_side: 0.0,
         priority_warning: false,
     };
+    // and every other variable of theirs, as their scripts have it (`omsi_net::vars`)
+    pinned.extend(rv.synced.iter().filter(|(id, _)| !rv.smooth.contains(*id)).map(|(id, v)| (*id as VarId, *v)));
     rv.vehicle.update_ai_with(dt, &frame, &inputs, &pinned);
+    for (id, text) in &rv.synced_strings {
+        if let Some(s) = rv.vehicle.state.str_vars.get_mut(*id as usize) {
+            if s != text {
+                s.clone_from(text);
+            }
+        }
+    }
     rv.last = pose.clone();
+}
+
+/// Our vehicle's variables to the others, and theirs taken into the copies drawn here.
+fn sync_vars(lan: &mut LanSession, game: &mut LanGame, player: Option<&Player>, dt: f32) {
+    if omsi_cfg::env::var_os("OMSI_NO_VAR_SYNC").is_some() {
+        return;
+    }
+    if let Some(p) = player {
+        let program = &p.vehicle.ty.program;
+        let key = Arc::as_ptr(program) as usize;
+        if game.my_vars.as_ref().map(|m| m.0) != Some(key) {
+            let t = var_table(program);
+            log::info!("LAN: {} variables and {} strings of our bus go to the others (table {:08x})", t.floats.len(), t.strings.len(), t.hash);
+            game.my_vars = Some((key, Arc::new(t)));
+        }
+        let t = game.my_vars.as_ref().map(|m| m.1.clone()).expect("just made");
+        let vars = &p.vehicle.state.vars;
+        let floats: Vec<f32> = t.floats.iter().map(|id| vars.get(*id as usize).copied().unwrap_or(0.0)).collect();
+        let strs = &p.vehicle.state.str_vars;
+        let strings: Vec<String> = t.strings.iter().map(|id| strs.get(*id as usize).cloned().unwrap_or_default()).collect();
+        lan.send_vars(t.hash, &t.floats, &floats, &t.strings, &strings, dt);
+        // `OMSI_DEBUG_VAR_SYNC=<variable>`: ours every two seconds, theirs as it came
+        if let Some(name) = omsi_cfg::env::var("OMSI_DEBUG_VAR_SYNC").ok() {
+            game.vars_log += dt;
+            if game.vars_log > 2.0 {
+                game.vars_log = 0.0;
+                log::info!("LAN vars: ours {name} = {:?}", p.vehicle.var(&name));
+                for (id, rv) in &game.remotes {
+                    let theirs = rv.vehicle.ty.program.var(&name).and_then(|k| rv.synced.get(&(k as u16)).copied());
+                    log::info!("LAN vars: player {id}'s {name} = {theirs:?} ({} variables, {} strings taken)", rv.synced.len(), rv.synced_strings.len());
+                }
+            }
+        }
+    }
+    for v in lan.take_vars() {
+        let Some(rv) = game.remotes.get_mut(&v.id) else { continue };
+        if rv.stand_in {
+            continue;
+        }
+        if rv.vars.is_none() {
+            let t = var_table(&rv.vehicle.ty.program);
+            let tbl = &rv.table;
+            rv.smooth = tbl.lamps.iter().chain(&tbl.switches).chain(&tbl.values).map(|(_, id)| *id as u16).chain(tbl.doors.iter().map(|id| *id as u16)).chain(tbl.engine_n.map(|id| id as u16)).collect();
+            rv.vars = Some(t);
+        }
+        let Some(t) = rv.vars.as_ref() else { continue };
+        if t.hash != v.table {
+            continue;
+        }
+        let (nf, ns) = (rv.vehicle.state.vars.len(), rv.vehicle.state.str_vars.len());
+        for (id, x) in v.floats {
+            if (id as usize) < nf && x.is_finite() {
+                rv.synced.insert(id, x);
+            }
+        }
+        for (id, s) in v.strings {
+            if (id as usize) < ns {
+                rv.synced_strings.insert(id, s);
+            }
+        }
+    }
 }
 
 /// The outside sounds of a remote bus: made when it comes into earshot, dropped beyond.
@@ -3042,6 +3172,7 @@ pub fn tick(
         }
     }
     let gone = lan.tick(dt, &mine);
+    sync_vars(lan, game, player.as_deref(), dt);
     game.world.tick(
         lan,
         dt,

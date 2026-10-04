@@ -662,11 +662,29 @@ fn driving_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
     toggle_setting(ui, s, dirty, c.row(), "Force feedback and vibration", "ff_enabled");
     toggle_setting(ui, s, dirty, c.row(), "Invert force feedback by default", "ff_invert");
     c.y += ui.paragraph("Wheels with a saved direction use their own setting under Controls → Game controllers.", Vec2::new(c.inner.x, c.y), c.inner.w, 12.5, Weight::Regular, TEXT_DIM) + 8.0;
+    toggle_setting(ui, s, dirty, c.row(), "Invert force feedback", "ff_invert");
+    // what the wheel feels all the time while the bus runs: the road's grain and the
+    // engine's buzz, and how long a jolt eases away once it is over
+    for (key, label, id) in [("ff_road_vib", "Road texture vibration", "s-ffroad"), ("ff_engine_vib", "Engine vibration", "s-ffeng")] {
+        let mut v = get(s, key).as_f64().unwrap_or(1.0) as f32;
+        if ui.slider(id, c.row(), &mut v, 0.0, 4.0, 0.05, label, &|v| if v < 0.01 { "Off".to_string() } else if (v - 1.0).abs() < 0.01 { "Normal".to_string() } else { format!("{:.0}%", v * 100.0) }) {
+            s[key] = json!((v * 20.0).round() / 20.0);
+            *dirty = 0.3;
+        }
+    }
+    let mut fade = get(s, "ff_fade").as_f64().unwrap_or(0.28) as f32;
+    if ui.slider("s-fffade", c.row(), &mut fade, 0.0, 1.5, 0.05, "Vibration fade-out", &|v| if v < 0.01 { "Off".to_string() } else { format!("{:.0} ms", (v * 1000.0).round() as i32) }) {
+        s["ff_fade"] = json!((fade * 100.0).round() / 100.0);
+        *dirty = 0.3;
+    }
     if ui.button("s-wreset", c.row(), "Reset wheel settings", Some("restart_alt"), ButtonKind::Normal) {
         s["wheel_range"] = json!(900.0);
         s["wheel_lock"] = json!(0.0);
         s["ff_invert"] = json!(false);
         s["ff_enabled"] = json!(true);
+        s["ff_road_vib"] = json!(1.0);
+        s["ff_engine_vib"] = json!(1.0);
+        s["ff_fade"] = json!(0.28);
         *dirty = 0.3;
     }
     if ui.button("s-go-pads", c.row(), "Set up a wheel or pedals", Some("sports_esports"), ButtonKind::Normal) {
@@ -679,6 +697,7 @@ fn driving_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
 fn camera_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, cols: [Rect; 2]) -> [f32; 2] {
     let mut c = Col::new(ui, cols[0], "Driver's view");
     // the driver's eye, moved from the bus's own camera
+    c.section(ui, "Seat position");
     for (key, label, id) in [("seat_y", "Seat forward / back", "s-seaty"), ("seat_z", "Seat up / down", "s-seatz"), ("seat_x", "Seat right / left", "s-seatx")] {
         let mut v = get(s, key).as_f64().unwrap_or(0.0) as f32;
         if ui.slider(id, c.row(), &mut v, -0.6, 0.6, 0.01, label, &|v| format!("{:+.0} cm", v * 100.0)) {
@@ -686,10 +705,16 @@ fn camera_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, co
             *dirty = 0.3;
         }
     }
+    let mut seat_pitch = get(s, "seat_pitch_deg").as_f64().unwrap_or(0.0) as f32;
+    if ui.slider("s-seat-pitch", c.row(), &mut seat_pitch, -45.0, 45.0, 1.0, "Head pitch", &|v| format!("{v:+.0}°")) {
+        s["seat_pitch_deg"] = json!(seat_pitch.round());
+        *dirty = 0.3;
+    }
     if ui.button("s-seatreset", c.row(), "Reset the seat position", Some("restart_alt"), ButtonKind::Normal) {
         for k in ["seat_x", "seat_y", "seat_z"] {
             s[k] = json!(0.0);
         }
+        s["seat_pitch_deg"] = json!(0.0);
         *dirty = 0.3;
     }
     let fov_key = if get(s, "triple_screen").as_bool().unwrap_or(false)
@@ -709,6 +734,23 @@ fn camera_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, co
         s["look_sens"] = json!((look * 100.0).round() / 100.0);
         *dirty = 0.3;
     }
+    toggle_setting(ui, s, dirty, c.row(), "Right stick turns the view", "right_stick_look");
+    let mut smooth = get(s, "look_smoothing_ms").as_f64().unwrap_or(0.0) as f32;
+    if ui.slider("s-look-smoothing", c.row(), &mut smooth, 0.0, 200.0, 10.0, "Smooth the mouse look", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{v:.0} ms") }) {
+        s["look_smoothing_ms"] = json!(smooth.round());
+        *dirty = 0.3;
+    }
+    c.section(ui, "A head at rest");
+    let mut idle = get(s, "head_idle").as_f64().unwrap_or(0.0) as f32;
+    if ui.slider("s-head-idle", c.row(), &mut idle, 0.0, 1.0, 0.05, "Head sway at a standstill", &|v| if v <= 0.0 { "Off".to_string() } else { format!("{:.0}%", v * 100.0) }) {
+        s["head_idle"] = json!((idle * 100.0).round() / 100.0);
+        *dirty = 0.3;
+    }
+    let mut pace = get(s, "head_idle_pace").as_f64().unwrap_or(1.0) as f32;
+    if ui.slider("s-head-idle-pace", c.row(), &mut pace, 0.5, 2.0, 0.05, "Sway pace", &|v| format!("{:.0}%", v * 100.0)) {
+        s["head_idle_pace"] = json!((pace * 100.0).round() / 100.0);
+        *dirty = 0.3;
+    }
     toggle_setting(ui, s, dirty, c.row(), "Driver's view turns with the steering", "steer_look");
     let mut angle = get(s, "steer_look_angle").as_f64().unwrap_or(30.0) as f32;
     if ui.slider("s-steer-look-angle", c.row(), &mut angle, 0.0, 60.0, 1.0, "Steering view angle", &|v| format!("{v:.0}°")) {
@@ -724,6 +766,7 @@ fn camera_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, co
     toggle_setting(ui, s, dirty, c.row(), "Camera glides between viewpoints", "driverview_smooth");
     toggle_setting(ui, s, dirty, c.row(), "Driver's hands in the cab view", "hands_in_cab");
     toggle_setting(ui, s, dirty, c.row(), "Right mouse button turns the view, Shift+right zooms (off: right zooms as in OMSI, the wheel button turns)", "alt_view");
+    toggle_setting(ui, s, dirty, c.row(), "Precision mouse zoom (FOV curve instead of the linear way)", "precision_zoom");
     let left = c.used();
     let mut c = Col::new(ui, cols[1], "Outside views");
     toggle_setting(ui, s, dirty, c.row(), "Camera collisions (outside view)", "camera_collision");
@@ -1019,6 +1062,12 @@ fn general_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
     toggle_setting(ui, s, dirty, c.row(), "Frame rate in the corner", "show_fps");
     toggle_setting(ui, s, dirty, c.row(), "Notes in the top-left corner", "notes");
     toggle_setting(ui, s, dirty, c.row(), "Chat in online games", "chat");
+    // (the chat's own size on top of the interface's; Ctrl + the wheel over it in the game)
+    let mut chat = get(s, "chat_size").as_f64().unwrap_or(1.0) as f32;
+    if ui.slider("s-chatsize", c.row(), &mut chat, 0.5, 3.0, 0.1, "Chat size", &|v| format!("{:.0}%", v * 100.0)) {
+        s["chat_size"] = json!((chat * 10.0).round() / 10.0);
+        *dirty = 0.3;
+    }
     toggle_setting(ui, s, dirty, c.row(), "Other players' names above their buses", "name_tags");
     c.section(ui, "Navigator");
     toggle_setting(ui, s, dirty, c.row(), "Navigator (Shift+N: map, schedule, off)", "navigator");
@@ -1053,6 +1102,8 @@ fn general_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
     let mut c = Col::new(ui, cols[1], "Updates");
     toggle_setting(ui, s, dirty, c.row(), "Look for updates when the launcher starts", "update_check");
     toggle_setting(ui, s, dirty, c.row(), "Install updates without asking", "update_auto");
+    toggle_setting(ui, s, dirty, c.row(), "Tell me about a new version during a session", "update_notify");
+    toggle_setting(ui, s, dirty, c.row(), "Count me in the website's \"playing now\" (anonymous)", "presence");
     {
         use crate::updater::Status;
         let r = c.row();
@@ -1430,12 +1481,17 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         pv.confirm_remove = None;
     }
     if let Some(name) = add {
+        // (a device of buttons only - a gear shifter, a button box - has no axes for the
+        // assistant: its buttons are given their keys on its page)
+        let axes = !pv.io.as_ref().is_some_and(|io| io.buttons_only(&name));
         devices.push(DeviceCfg { name, second: "0".into(), ..Default::default() });
         pv.selected = devices.len() - 1;
         pv.revealed_button = None;
         pv.dirty = true;
         // a new device starts with the assistant
-        pv.wizard = Some(Wizard { step: 0, rest: [None; 8], at: Vec::new(), error: None, calibration: None, ff_choice: None, test_strength: crate::ffb_calibration::PULSE_FORCE });
+        if axes {
+            pv.wizard = Some(Wizard { step: 0, rest: [None; 8], at: Vec::new(), error: None, calibration: None, ff_choice: None, test_strength: crate::ffb_calibration::PULSE_FORCE });
+        }
     }
     // the dead zone (a setting of the game's)
     let dz_r = Rect::new(inner.x, inner.bottom() - 98.0, inner.w, 34.0);
@@ -1500,7 +1556,8 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
             l.state.settings_dirty = 0.3;
         }
     }
-    if l.ui.button("pad-wizard", Rect::new(inner.right() - 220.0, inner.y - 36.0, 220.0, 30.0), "Set up step by step", Some("touch_app"), ButtonKind::Normal) {
+    let buttons_only = pv.io.as_ref().is_some_and(|io| io.buttons_only(&d.name));
+    if !buttons_only && l.ui.button("pad-wizard", Rect::new(inner.right() - 220.0, inner.y - 36.0, 220.0, 30.0), "Set up step by step", Some("touch_app"), ButtonKind::Normal) {
         pv.wizard = Some(Wizard { step: 0, rest: [None; 8], at: Vec::new(), error: None, calibration: None, ff_choice: None, test_strength: crate::ffb_calibration::PULSE_FORCE });
     }
     const AXES: [&str; 8] = ["X axis", "Y axis", "Z axis", "X rotation", "Y rotation", "Z rotation", "Slider 1", "Slider 2"];
@@ -1562,7 +1619,8 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         let sel_w = (w - lab_w - inv_w - shp_w - 60.0 - 4.0 * GAP).clamp(120.0, 200.0);
         let bar_w = (w - lab_w - sel_w - inv_w - shp_w - 4.0 * GAP).max(30.0);
         let shapes: Vec<String> = crate::controllers::AXIS_SHAPES.iter().map(|s| s.0.to_string()).collect();
-        for a in 0..8 {
+        // (a device of buttons only has no axes to give a function)
+        for a in (0..8).filter(|_| !buttons_only) {
             let r = Rect::new(x0, y, w, ROW);
             ui.label(Rect::new(r.x, r.y, lab_w, r.h), AXES[a]);
             let bar = Rect::new(r.x + lab_w + GAP, r.y + 12.0, bar_w, r.h - 24.0);
@@ -2535,15 +2593,20 @@ mod settings_tests {
         }
         let driving = vec![
             "s-keys", "set-steering_linear", "set-old_steering", "set-red_steer_spd", "s-mouse", "set-mouse_smooth", "set-mouse_right_off", "set-blinker_cancel", "set-brake_hold", "set-auto_clutch", "set-momentary_gears", "s-go-keys",
-            "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "s-wreset", "s-go-pads",
+            "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "s-ffroad", "s-ffeng", "s-fffade", "s-wreset", "s-go-pads",
         ];
         let mut camera = vec![
             "s-seaty",
             "s-seatz",
             "s-seatx",
+            "s-seat-pitch",
             "s-seatreset",
             "s-fov",
             "s-look-sens",
+            "set-right_stick_look",
+            "s-look-smoothing",
+            "s-head-idle",
+            "s-head-idle-pace",
             "set-steer_look",
             "s-steer-look-angle",
             "s-steer-look-response",
@@ -2551,6 +2614,7 @@ mod settings_tests {
             "set-driverview_smooth",
             "set-hands_in_cab",
             "set-alt_view",
+            "set-precision_zoom",
             "set-camera_collision",
             "set-driver",
             "set-head_tracking",
@@ -2574,9 +2638,9 @@ mod settings_tests {
             "s-maint", "set-collision_vehicles", "set-collision_objects", "set-collision_pedestrians", "set-use_real_time", "set-use_real_date", "set-time_sync", "set-metar_sync", "s-timespeed",
         ];
         let general = vec![
-            "s-lang", "set-machine_translation", "set-launcher_rest", "set-discord_status", "set-voice_chat", "s-uiscale", "set-ui_scale_window", "s-uiop", "set-tooltips", "set-show_fps", "set-notes", "set-chat", "set-name_tags",
+            "s-lang", "set-machine_translation", "set-launcher_rest", "set-discord_status", "set-voice_chat", "s-uiscale", "set-ui_scale_window", "s-uiop", "set-tooltips", "set-show_fps", "set-notes", "set-chat", "s-chatsize", "set-name_tags",
             "set-navigator", "set-nav_arrows", "set-nav_ai", "corner-top-left", "corner-top-right", "corner-bottom-left", "corner-bottom-right",
-            "set-update_check", "set-update_auto", "s-upd-check", "s-upd-github", "s-reset",
+            "set-update_check", "set-update_auto", "set-update_notify", "set-presence", "s-upd-check", "s-upd-github", "s-reset",
         ];
         vec![graphics, driving, camera, sound, gameplay, general]
     }
@@ -2638,6 +2702,23 @@ mod settings_tests {
             }
             assert_eq!(ui.drawn.len(), names.len(), "the {} tab has a clickable thing more than the list names", SETTINGS_TABS[tab]);
         }
+    }
+
+    #[test]
+    fn right_stick_look_switch_toggles_and_saves_from_the_camera_tab() {
+        let mut s = all_rows();
+        assert_eq!(s["right_stick_look"], json!(true));
+
+        click(2, "set-right_stick_look", &mut s);
+        assert_eq!(s["right_stick_look"], json!(false));
+        let saved = core::settings_to_text(&s, None);
+        assert_eq!(
+            core::settings_from_text(Some(&saved))["right_stick_look"],
+            json!(false)
+        );
+
+        click(2, "set-right_stick_look", &mut s);
+        assert_eq!(s["right_stick_look"], json!(true));
     }
 
     #[test]

@@ -704,6 +704,7 @@ fn segments_cross(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> bool {
 #[derive(Clone)]
 struct BusNow {
     id: BusId,
+    next_stop: Option<RequestStop>,
     cabin: Arc<Cabin>,
     pos: DVec3,
     rot: Mat4,
@@ -1494,6 +1495,7 @@ pub struct Humans {
     /// Passenger cabins by vehicle files (the front vehicle and its coupled parts).
     cabins: HashMap<Vec<PathBuf>, Option<Arc<Cabin>>>,
     player_cabin: Option<Arc<Cabin>>,
+    player_next_stop: Option<RequestStop>,
     /// Which places of each bus are taken.
     seats: HashMap<BusId, Vec<bool>>,
     /// The bus stops as Omsi.exe keeps them for the people (see `humans_pax`).
@@ -1794,6 +1796,7 @@ impl Humans {
             wall_key: (0, 0, 0, 0.0),
             cabins: HashMap::new(),
             player_cabin: None,
+            player_next_stop: None,
             seats: HashMap::new(),
             stops: HashMap::new(),
             odometer: HashMap::new(),
@@ -2080,6 +2083,19 @@ impl Humans {
             self.footfalls.clear();
         }
         std::mem::take(&mut self.footfalls)
+    }
+
+    /// Everybody: (walking, waiting at a stop, in a bus).
+    pub fn counts(&self) -> (usize, usize, usize) {
+        let (mut walking, mut waiting, mut aboard) = (0, 0, 0);
+        for p in &self.people {
+            match (&p.place, &p.state) {
+                (Place::Bus(..), _) => aboard += 1,
+                (Place::Ground, State::Pax(x)) if x.inside.is_none() => waiting += 1,
+                (Place::Ground, _) => walking += 1,
+            }
+        }
+        (walking, waiting, aboard)
     }
 
     /// People currently in the player's bus.
@@ -2681,7 +2697,7 @@ impl Humans {
         let sp = self.stops[&id].spots[k].clone();
         let (dest, line) = self.draw_dest(id);
         let walk = 1.1 + (self.rand_f() as f32 * 2.0 - 1.0) * 0.2;
-        let mut pax = Pax::new(walk);
+        let mut pax = Pax::new(walk, self.rand_f());
         pax.stop = Some(id);
         pax.spot = Some(k);
         pax.pos = sp.pos;
@@ -2936,6 +2952,75 @@ impl Humans {
     }
 
 
+    pub fn set_player_next_stop(&mut self, stop: Option<&crate::schedule::PlannedStop>) {
+        // (called once a frame: worked out again only when the duty moves on to another stop)
+        if let (Some(s), Some(cur)) = (stop, self.player_next_stop.as_ref()) {
+            if cur.id == s.object_id {
+                return;
+            }
+        }
+        self.player_next_stop = stop
+            .and_then(|stop| self.request_stop(stop.object_id, Some(&stop.name), stop.position));
+    }
+
+    fn request_stop(
+        &self,
+        id: i64,
+        name: Option<&str>,
+        position: Option<DVec3>,
+    ) -> Option<RequestStop> {
+        let loaded = self.stops.get(&id);
+        let name = name
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| loaded.map(|stop| stop.name.clone()))
+            .unwrap_or_else(|| id.to_string());
+        let alias = loaded
+            .map(|stop| {
+                if name.trim() == stop.name.trim() {
+                    stop.alias.clone()
+                } else {
+                    stop.name.clone()
+                }
+            })
+            .unwrap_or_default();
+        Some(RequestStop {
+            id,
+            name,
+            alias,
+            pos: position.or_else(|| loaded.map(|stop| stop.pos))?,
+        })
+    }
+
+    fn vehicle_next_stop(&self, vehicle: &VehicleInstance) -> Option<RequestStop> {
+        if let Ok(index) = usize::try_from(vehicle.host.tt_busstop_index) {
+            if let Some(id) = vehicle.host.tt_stop_ids.get(index) {
+                let name = vehicle.host.tt_stops.get(index).map(|stop| stop.0.as_str());
+                if let Some(stop) = self.request_stop(*id, name, None) {
+                    return Some(stop);
+                }
+            }
+        }
+        let name = vehicle.str_var("act_busstop");
+        if name.trim().is_empty() {
+            return None;
+        }
+        let (id, _) = self
+            .stops
+            .iter()
+            .filter(|(_, stop)| stop.is_named(&name))
+            .min_by(|(_, a), (_, b)| {
+                let back =
+                    |stop: &PaxStop| crowd::angle_diff(vehicle.heading, stop.heading).abs() > 100.0;
+                back(a).cmp(&back(b)).then_with(|| {
+                    (a.pos - vehicle.position)
+                        .length_squared()
+                        .total_cmp(&(b.pos - vehicle.position).length_squared())
+                })
+            })?;
+        self.request_stop(*id, Some(&name), None)
+    }
+
     /// The buses passengers deal with this frame.
     fn gather_buses(
         &mut self,
@@ -2996,6 +3081,10 @@ impl Humans {
                 terminus,
                 takes,
                 id: BusId::Player,
+                next_stop: self
+                    .player_next_stop
+                    .clone()
+                    .or_else(|| self.vehicle_next_stop(b)),
                 walk_open: None,
                 places_off: places_off(b, &cabin),
                 cabin,
@@ -3077,6 +3166,19 @@ impl Humans {
                     terminus: c.bus.as_ref().map(|b| b.terminus.trim().to_string()).filter(|t| !t.is_empty()),
                     takes: Takes::Terminus,
                     id: BusId::Ai(c.id),
+                    next_stop: c
+                        .bus
+                        .as_ref()
+                        .and_then(|bus| bus.stops.front())
+                        .and_then(|stop| {
+                            let position = c
+                                .state
+                                .route
+                                .get(stop.ri)
+                                .and_then(|lane| t.net.lanes.get(*lane))
+                                .map(|lane| lane.at(stop.s).0);
+                            self.request_stop(stop.id, None, position)
+                        }),
                     walk_open: None,
                     places_off: places_off(&c.vehicle, &cabin),
                     cabin,
@@ -3136,6 +3238,7 @@ impl Humans {
             takes: Takes::Nobody,
             places_off: Vec::new(),
             id,
+            next_stop: None,
             entry_open: vec![false; cabin.entries.len()],
             exit_open: vec![false; cabin.exits.len()],
             walk_open: Some(walk_open),
@@ -3242,6 +3345,7 @@ impl Humans {
                 takes: Takes::Nobody,
                 places_off: Vec::new(),
                 id: BusId::Ai(remote_bus_id(player)),
+                next_stop: None,
                 entry_open: vec![false; cabin.entries.len()],
                 exit_open: vec![false; cabin.exits.len()],
                 walk_open: Some(walk_open),
@@ -3533,7 +3637,7 @@ impl Humans {
             let Some(k) = self.reserve_place(BusId::Player, cabin.seats.len(), &off) else { break };
             let walk = 1.1 + (self.rand_f() as f32 * 2.0 - 1.0) * 0.2;
             let r = self.rand_f() as f32;
-            let mut pax = Pax::new(walk);
+            let mut pax = Pax::new(walk, self.rand_f());
             pax.bus = Some(BusId::Player);
             pax.inside = Some(BusId::Player);
             pax.seat = Some(k);
@@ -5519,7 +5623,7 @@ impl Humans {
         let sp = self.stops[&stop].spots.get(spot).cloned();
         let seatheight = self.people[i].ty.def.seat_height;
         let walk = 1.1 + (self.rand_f() as f32 * 2.0 - 1.0) * 0.2;
-        let mut pax = Pax::new(walk);
+        let mut pax = Pax::new(walk, self.rand_f());
         pax.task = Task::WaitingForBus;
         pax.stop = Some(stop);
         // what a waiting person of ours has (sub_626044 and task 6): a destination drawn
@@ -6289,6 +6393,7 @@ mod tests {
             trailers: Vec::new(),
             terminus: None,
             takes: Takes::Terminus,
+            next_stop: None,
             places_off: Vec::new(),
         };
         let taken = places_taken(&bn, &[(BusId::Player, 1), (BusId::Ai(2), 2)]);
@@ -6346,6 +6451,7 @@ mod tests {
             trailers: Vec::new(),
             terminus: None,
             takes: Takes::Terminus,
+            next_stop: None,
             places_off: Vec::new(),
         };
         let step_in = bn.world(Vec3::new(1.35, 4.0, 0.0));
