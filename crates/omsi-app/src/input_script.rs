@@ -2407,8 +2407,10 @@ impl App {
         let hof = p.vehicle.host.hof.as_ref().and_then(|h| h.path.file_stem().map(|s| s.to_string_lossy().to_string()).or_else(|| Some(h.name.clone())));
         let at = (p.vehicle.position.x, p.vehicle.position.y, p.vehicle.heading);
         let state = keep.then(|| crate::devmode::script_state_of(&p.vehicle));
-        // (the head stays turned where it was looking: the reload is not a new seat)
-        let look = self.look;
+        // (the seat is not left: the view, which of the bus's eyes, and where the head was
+        // turned all stay - taking a vehicle over otherwise puts the player at the wheel
+        // looking forward, which is right when getting in on foot and wrong here)
+        let (view, look, cam_choice) = (self.view.clone(), self.look, self.player.as_ref().map(|p| p.cam_choice));
         let t0 = std::time::Instant::now();
         // what the content folders hold is looked at again: a file that was not there when
         // the bus was last read (a new texture, a new mesh) is found now
@@ -2429,10 +2431,21 @@ impl App {
         // (what was not placed leaves these behind)
         self.reload_at = None;
         self.reload_keep = None;
+        if self.player.is_some() {
+            if let (Some(c), Some(p)) = (cam_choice, self.player.as_mut()) {
+                p.cam_choice = c;
+            }
+            self.view = view;
+            self.sync_view_look();
+            self.look = look;
+            let next_cam = self.camera.as_ref().zip(self.player.as_ref()).map(|(cam, p)| p.camera(&self.view, cam));
+            if let Some(c) = next_cam {
+                self.camera = Some(c);
+            }
+        }
         if let Some(p) = self.player.as_ref() {
             let name = format!("{} {}", p.vehicle.ty.def.manufacturer, p.vehicle.ty.def.type_name);
             let errors = p.vehicle.ty.program.errors.len();
-            self.look = look;
             let how = if keep { "with the state it had" } else { "cold" };
             log::info!("reload: {} read again {how} in {:.2} s, {errors} script errors", name.trim(), t0.elapsed().as_secs_f64());
             self.service_msg = Some(match errors {
