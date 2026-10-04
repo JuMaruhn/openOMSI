@@ -514,8 +514,9 @@ left. The page has three tabs (**Tab** or **PageUp/PageDown** step through them)
   variable that moves each - the map between a model and its scripts.
 * **Scripts** - what the compiler made of them: every error with its file, its line and OMSI's
   own message. They only ever went into the log before.
-* **World** - the traffic, the passengers and the clock speed as they stand, the next weather,
-  and the way to the full weather and time pages.
+* **World** - what the mode quietened: the traffic, the passengers and the clock speed, to let
+  any of them go again without leaving the page. The weather and the clock itself are not here;
+  *World options* has them whole.
 
 ## Object editor
 

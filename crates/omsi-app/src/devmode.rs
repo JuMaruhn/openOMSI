@@ -3,12 +3,13 @@
 //! A bus is developed by driving it - its doors, switches, IBIS, sound and physics only
 //! answer in the game - so the place to work on one is the game, not a picture of it in the
 //! launcher. The mode gathers what that work needs on one page of the game menu: the bus to
-//! work on, the light to look at it in, a script variable written by hand, and the vehicle
+//! work on, what it is made of, a script variable written by hand, and the vehicle
 //! read again from its files (`App::reload_driven_vehicle`, #728). The world is quietened
 //! while it is on - no traffic, no passengers, a clock that stands still - and put back the
 //! way it was when it is left, because none of that is what is being looked at.
 //!
 //! Ctrl+Shift+D, the game menu's *Vehicle development...*, or `--dev-vehicle` at the start.
+//! The weather and the clock are not part of it: *World options* has them whole.
 //!
 //! **The original installation is never written to.** A bus that lives there cannot be
 //! edited, so the page offers to copy its folder into the content folder, which the game
@@ -163,13 +164,13 @@ pub(crate) fn pages(app: &App) -> Vec<(&'static str, Vec<(String, String)>)> {
         vars.push(gl::button("Write it", "Set", "Write the value into the variable now", "devset"));
     }
 
-    // the world, quietened: the rows of the World window, so the one page is enough
+    // what the mode quietens, so it can be let go again without leaving the page. The
+    // weather and the clock are not here: the World window has them whole, and a second,
+    // smaller way to the same settings is one to keep in step for nothing.
     let mut world: Vec<(String, String)> = Vec::new();
     world.extend(gl::slider_row(app, "traffic", "Traffic", "How many vehicles drive around the map.", &|v| format!("{} vehicles", v as i64)));
     world.extend(gl::slider_row(app, "pax", "Passengers", "How many passengers wait at the stops and ride.", &|v| format!("{:.0} %", v * 100.0)));
     world.extend(gl::slider_row(app, "speed", "Time speed", "How fast the clock runs.", &|v| format!("{v} x")));
-    world.push(gl::button("Weather", "Next", "The next installed weather", "weather"));
-    world.push(gl::button("Weather and time in full", "Open", "The World options, where every weather value and the clock are set", "devworld"));
 
     vec![("Vehicle", bus), ("Variable", vars), ("Files", files(app)), ("Scripts", errors(app)), ("World", world)]
 }

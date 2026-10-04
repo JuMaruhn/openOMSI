@@ -3143,7 +3143,6 @@ impl App {
                 }
                 return false;
             }
-            "devworld" => self.open_list(crate::game_lists::ListKind::World(0)),
             "timetable" => {
                 self.timetable = !self.timetable;
                 self.close_game_menu();
