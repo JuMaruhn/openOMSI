@@ -227,9 +227,12 @@ budget.
    page of their own, and another lists the bus's files and its meshes with the variable that
    moves each. The folder is watched while the mode asks for it (the newest change time under
    it, looked for on a worker once a second, as the Lua plugin host watches its own), so a save
-   reads the bus again by itself. Next there: a rear section keeping its state as the leading
-   vehicle does, and a finer path that swaps only a changed texture (`replace_texture`) instead
-   of reading the whole bus. **(first pass)**
+   reads the bus again by itself. A coupled part has no script state of its own - its meshes are
+   moved by the leading vehicle's variables - but it has where its turning axle stands
+   (`TrailerPart::pivot`), and the reload carries that too, so an articulated bus read again in
+   a bend comes back bent rather than snapped straight. Still open there: a vehicle coupled by
+   hand is not coupled again (only what the `.bus` names), and the graphics mode still cannot be
+   changed while the game runs. **(done)**
    Also: `[newanim]` blocks composed the way the original does (see docs/FORMATS.md) - the
    doors fold to the sides of the doorway again and every other two-stage part (gear
    selector, parking brake, sun blind, ignition key) sits where it belongs; people on foot

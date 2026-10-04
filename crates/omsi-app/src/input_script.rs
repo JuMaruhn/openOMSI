@@ -2407,6 +2407,10 @@ impl App {
         let hof = p.vehicle.host.hof.as_ref().and_then(|h| h.path.file_stem().map(|s| s.to_string_lossy().to_string()).or_else(|| Some(h.name.clone())));
         let at = (p.vehicle.position.x, p.vehicle.position.y, p.vehicle.heading);
         let state = keep.then(|| crate::devmode::script_state_of(&p.vehicle));
+        // where each coupled part's turning axle stands: a rear section has no variables of
+        // its own, but it has this, and without it an articulated bus read again in a bend
+        // comes back with its rear snapped straight (`TrailerPart::pivot`)
+        let pivots: Vec<Option<glam::DVec3>> = keep.then(|| p.vehicle.trailers.iter().map(|t| t.pivot()).collect()).unwrap_or_default();
         // (the seat is not left: the view, which of the bus's eyes, and where the head was
         // turned all stay - taking a vehicle over otherwise puts the player at the wheel
         // looking forward, which is right when getting in on foot and wrong here)
@@ -2434,6 +2438,15 @@ impl App {
         if self.player.is_some() {
             if let (Some(c), Some(p)) = (cam_choice, self.player.as_mut()) {
                 p.cam_choice = c;
+            }
+            // (only when the train is the same one: a bus whose coupled parts changed with
+            // the file gets them where a fresh one has them)
+            if let Some(p) = self.player.as_mut().filter(|p| p.vehicle.trailers.len() == pivots.len()) {
+                for (t, at) in p.vehicle.trailers.iter_mut().zip(&pivots) {
+                    if let Some(at) = at {
+                        t.set_pivot(*at);
+                    }
+                }
             }
             self.view = view;
             self.sync_view_look();

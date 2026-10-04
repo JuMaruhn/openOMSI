@@ -3403,6 +3403,22 @@ pub fn coupling_placement(
 }
 
 impl TrailerPart {
+    /// Where its turning axle stands in the world. This is the whole of a coupled part's own
+    /// state: its heading and its place are worked out from this point and the coupling of
+    /// the part in front every frame, and it has no script variables of its own (its meshes
+    /// are moved by the leading vehicle's). None until a frame has placed it - a part that
+    /// has none starts straight behind the vehicle.
+    ///
+    /// A reload carries it over (`omsi-app::devmode`): read again in a bend, a rear section
+    /// would otherwise snap straight behind the bus.
+    pub fn pivot(&self) -> Option<DVec3> {
+        self.pivot
+    }
+
+    pub fn set_pivot(&mut self, at: DVec3) {
+        self.pivot = Some(at);
+    }
+
     /// Pitch (degrees, nose up), eased axle height and the track point it stands on (for
     /// the `OMSI_DEBUG_TRAILERS` trace).
     pub fn debug_pose(&self) -> (f32, Option<f64>, Option<DVec3>) {

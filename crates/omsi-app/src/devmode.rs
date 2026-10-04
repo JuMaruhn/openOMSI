@@ -471,6 +471,47 @@ mod tests {
         assert_eq!(again.var("Velocity"), Some(12.5), "and comes back with what was kept");
     }
 
+    /// A coupled part's own state is where its turning axle stands, and a reload carries it:
+    /// an articulated bus read again in a bend comes back bent, not snapped straight. The
+    /// bend is made here by moving the axle, which is what driving round a corner does to it.
+    /// (Needs an installation; without one it says so and stops.)
+    #[test]
+    fn a_rear_section_comes_back_in_the_bend_it_was_in() {
+        let root = omsi_cfg::env::var_os("OMSI_ROOT").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/Neoplan_N4421/Neoplan_N4421.bus");
+        if !bus.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = std::sync::Arc::new(omsi_sim::VehicleType::load(&root, &bus).expect("the bus loads"));
+        let settled = || {
+            let mut v = omsi_sim::VehicleInstance::new(ty.clone(), omsi_sim::VehicleHost::new(omsi_sim::SimClock::default()));
+            crate::spawn::load_coupled_parts(&root, &mut v);
+            for _ in 0..4 {
+                v.update(1.0 / 30.0);
+            }
+            v
+        };
+        let mut v = settled();
+        assert_eq!(v.trailers.len(), 1, "the N4421 is an articulated bus");
+        let straight = v.trailers[0].heading;
+        assert!((straight - v.heading).abs() < 1.0, "it stands straight behind the bus");
+        // the axle pushed to the side, as a corner pushes it
+        let at = v.trailers[0].pivot().expect("a frame has placed it") + glam::DVec3::new(4.0, 0.0, 0.0);
+        v.trailers[0].set_pivot(at);
+        v.update(1.0 / 30.0);
+        let bent = v.trailers[0].heading;
+        assert!((bent - straight).abs() > 10.0, "the rear section is in a bend now ({bent} against {straight})");
+
+        // read again: without the axle it starts straight behind the bus, with it, bent
+        let cold = settled();
+        assert!((cold.trailers[0].heading - straight).abs() < 1.0, "a fresh one is straight");
+        let mut kept = settled();
+        kept.trailers[0].set_pivot(at);
+        kept.update(1.0 / 30.0);
+        assert!((kept.trailers[0].heading - bent).abs() < 0.5, "and one given the axle back is in the same bend");
+    }
+
     /// What lies in the installation may not be written to; a mod or the content folder may.
     #[test]
     fn only_what_lies_outside_the_installation_can_be_edited() {

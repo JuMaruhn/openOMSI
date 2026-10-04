@@ -492,7 +492,11 @@ left. The page has three tabs (**Tab** or **PageUp/PageDown** step through them)
   doors stay open, the IBIS keeps its line. The values are carried over by their names, the way
   a saved situation keeps them, because a varlist that gains or loses a line moves every place
   after it. *Cold* does the same without carrying anything, which is what to try when a change
-  does not seem to take - a kept value can hide it. *Swap* puts another bus in its place.
+  does not seem to take - a kept value can hide it. An articulated bus keeps its bend as well:
+  a rear section has no variables of its own, but it has where its turning axle stands, and
+  that is carried over - read again in a corner, it comes back in that corner. (A vehicle
+  coupled by hand is not coupled again; only what the `.bus` itself names comes back.)
+  *Swap* puts another bus in its place.
   *Reload when a file is saved* turns the loop on: the vehicle's folder is looked at once a
   second, and as soon as anything in it has been saved - a script, a texture, a mesh - the bus
   is read again by itself. Edit in whatever editor, save, and the bus in front of you is the
