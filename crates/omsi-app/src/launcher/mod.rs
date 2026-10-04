@@ -448,7 +448,6 @@ impl ApplicationHandler for Launcher {
                     sf.resize(r, s.width, s.height);
                 }
             }
-            WindowEvent::Focused(false) => self.held.clear(),
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers.told(m.state());
                 self.modifiers.apply(&mut self.ui.input);
@@ -722,6 +721,10 @@ impl Launcher {
             self.pages.pads.cancel_feedback_test();
             self.modifiers.release_keys();
             self.modifiers.apply(&mut self.ui.input);
+            // a key let go of in another window is not let go of here: without this the
+            // Vehicle Editor's camera went on flying after Alt+Tab (the arm that cleared
+            // them stood after `Focused(f)` and no value ever reached it)
+            self.held.clear();
         }
         // (only once the game is on its way: the launcher has the focus while Start is
         // pressed, and gives the device up then as before)
