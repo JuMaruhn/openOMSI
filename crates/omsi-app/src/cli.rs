@@ -45,6 +45,10 @@ pub(crate) struct Args {
     /// View: driver, pax, outside, or free; mirror<n> shows what mirror n's camera sees (a check).
     #[arg(long, default_value = "driver")]
     pub(crate) view: String,
+    /// Start in the vehicle development mode (`crate::devmode`): the game as the workshop
+    /// for a bus - its page in the game menu, the world quiet around it.
+    #[arg(long = "dev-vehicle")]
+    pub(crate) dev_vehicle: bool,
     /// Put the bus into service at the start of the run (the Shift+U auto-start). With
     /// `--situation` the bus is not started up again (it keeps its saved state and IBIS);
     /// the flag then only has the duty's next trips typed into the IBIS as they come.

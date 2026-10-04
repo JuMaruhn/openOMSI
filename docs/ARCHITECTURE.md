@@ -212,6 +212,15 @@ budget.
    Next: bus stop shelters with waiting people inside, wear over a duty (bulb lifetimes,
    battery age), and the depot chooser that tells the workshop whether the bus is standing
    in a depot. **(current)**
+   Also: the **vehicle development mode** (`omsi-app::devmode`, Ctrl+Shift+D, `--dev-vehicle`)
+   - the game as the workshop for a bus: one page of the game menu for the bus loaded and its
+   files, the vehicle read again from them while it is driven (`reload_driven_vehicle`), a
+   script variable written by hand, and the world quiet around it (traffic, passengers and the
+   clock put back when the mode is left). A bus in the original installation is copied into the
+   content folder first, whole, because a vehicle package is read from one root only. Next
+   there: the reload keeping the variables it had, the GPU caches of the player's vehicle given
+   back so a changed mesh or texture is seen at all, an outliner over the bus's files, and a
+   reload when they are saved. **(first pass)**
    Also: `[newanim]` blocks composed the way the original does (see docs/FORMATS.md) - the
    doors fold to the sides of the doorway again and every other two-stage part (gear
    selector, parking brake, sun blind, ignition key) sits where it belongs; people on foot

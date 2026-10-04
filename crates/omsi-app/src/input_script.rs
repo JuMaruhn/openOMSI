@@ -383,6 +383,11 @@ impl App {
                         self.toggle_editor();
                         return;
                     }
+                    // the vehicle development mode (`crate::devmode`)
+                    KeyCode::KeyD if ctrl && shift_now && !alt => {
+                        crate::devmode::toggle(self);
+                        return;
+                    }
                     // OMSI's `sim_pause`
                     KeyCode::KeyP if !ctrl && !alt && !shift_now => {
                         self.toggle_pause();
@@ -1580,10 +1585,22 @@ impl App {
                 // `type <text>`: characters into the open LAN chat line (after `key V`)
                 "type" => {
                     let text = cmd.split_once(' ').map(|x| x.1).unwrap_or("");
-                    if lan::chat_open(&self.remotes) {
+                    // a field of the menu being typed into takes it (the development page's
+                    // variable, a route number, an ICAO code); otherwise the chat line
+                    if self.menu_edit.is_some() {
+                        if self.menu_edit_icao {
+                            self.icao_edit_text(text);
+                        } else if matches!(self.list_kind, Some(crate::game_lists::ListKind::Dev(_))) {
+                            self.dev_edit_text(text);
+                        } else if matches!(self.list_kind, Some(crate::game_lists::ListKind::RouteNumbers)) {
+                            self.route_edit_text(text);
+                        } else {
+                            log::warn!("input script: that field takes keys, not text");
+                        }
+                    } else if lan::chat_open(&self.remotes) {
                         lan::chat_type(&mut self.remotes, text);
                     } else {
-                        log::warn!("input script: the chat line is not open");
+                        log::warn!("input script: no field and no chat line is open");
                     }
                 }
                 // `turn dx,dy`: turn the view by degrees, as a right-button drag does
@@ -1943,6 +1960,52 @@ impl App {
         self.refresh_list();
     }
 
+    /// A key while a name or a value is typed on the development page. The text itself
+    /// comes through `dev_edit_text`, so every keyboard layout reaches a variable name.
+    fn dev_edit_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Escape => self.menu_edit = None,
+            KeyCode::Backspace | KeyCode::Delete => {
+                if let Some(t) = self.menu_edit.as_mut() {
+                    t.pop();
+                }
+            }
+            KeyCode::Enter | KeyCode::NumpadEnter => {
+                if let Some(t) = self.menu_edit.take() {
+                    self.dev_edit_done(&t);
+                }
+            }
+            _ => {}
+        }
+        self.refresh_list();
+    }
+
+    pub(crate) fn dev_edit_text(&mut self, text: &str) {
+        if !matches!(self.list_kind, Some(crate::game_lists::ListKind::Dev(_))) || self.menu_edit.is_none() {
+            return;
+        }
+        if let Some(t) = self.menu_edit.as_mut() {
+            for c in text.chars().filter(|c| !c.is_control()) {
+                if t.chars().count() >= 64 {
+                    break;
+                }
+                t.push(c);
+            }
+        }
+        self.refresh_list();
+    }
+
+    /// What was typed goes into the field it was typed for.
+    pub(crate) fn dev_edit_done(&mut self, text: &str) {
+        if let Some(d) = self.dev.as_mut() {
+            if d.typing_value {
+                d.value = text.trim().to_string();
+            } else {
+                d.var = text.trim().to_string();
+            }
+        }
+    }
+
     /// Set the clock to the time typed (digits: hh, hhmm or hhmmss; what is missing is 0).
     pub(crate) fn apply_time_edit(&mut self) {
         let Some(d) = self.menu_edit.take() else { return };
@@ -2023,7 +2086,7 @@ impl App {
     /// A settings window (options, vehicle, world) is open.
     fn settings_list(&self) -> bool {
         use crate::game_lists::ListKind;
-        self.chooser.is_some() && matches!(self.list_kind, Some(ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_)))
+        self.chooser.is_some() && matches!(self.list_kind, Some(ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_) | ListKind::Dev(_)))
     }
 
     /// The open list is closed: back to the game menu.
@@ -2045,6 +2108,7 @@ impl App {
             Some(ListKind::Options(_)) => ListKind::Options(i),
             Some(ListKind::Vehicle(_)) => ListKind::Vehicle(i),
             Some(ListKind::World(_)) => ListKind::World(i),
+            Some(ListKind::Dev(_)) => ListKind::Dev(i),
             _ => return,
         };
         self.menu_top = None;
@@ -2123,6 +2187,8 @@ impl App {
                 self.icao_edit_key(code);
             } else if matches!(self.list_kind, Some(crate::game_lists::ListKind::RouteNumbers)) {
                 self.route_edit_key(code);
+            } else if matches!(self.list_kind, Some(crate::game_lists::ListKind::Dev(_))) {
+                self.dev_edit_key(code);
             } else {
                 self.time_edit_key(code);
             }
@@ -2783,6 +2849,13 @@ impl App {
             }
             "vehicle" => self.open_list(crate::game_lists::ListKind::Vehicle(0)),
             "world" => self.open_list(crate::game_lists::ListKind::World(0)),
+            // (the page is the mode: opening it turns the mode on if it is off)
+            "devmode" => {
+                if self.dev.is_none() {
+                    crate::devmode::toggle(self);
+                }
+                self.open_list(crate::game_lists::ListKind::Dev(0));
+            }
             "copycode" => {
                 self.close_game_menu();
                 self.copy_server_code();
@@ -2938,6 +3011,28 @@ impl App {
                 self.close_game_menu();
                 self.toggle_editor();
             }
+            // the development page (`crate::devmode`): the two typed fields, the write and
+            // the copy stay on the page; the full weather and clock are the World window's
+            "devvar" | "devvalue" => {
+                // (what was typed belongs to the field it was typed for, even when the other
+                // one is picked to carry on with)
+                if let Some(t) = self.menu_edit.take() {
+                    self.dev_edit_done(&t);
+                }
+                let Some(d) = self.dev.as_mut() else { return false };
+                d.typing_value = id == "devvalue";
+                self.menu_edit = Some(if id == "devvalue" { d.value.clone() } else { d.var.clone() });
+                return false;
+            }
+            "devset" => {
+                crate::devmode::set_variable(self);
+                return false;
+            }
+            "devcopy" => {
+                crate::devmode::start_copy(self);
+                return false;
+            }
+            "devworld" => self.open_list(crate::game_lists::ListKind::World(0)),
             "timetable" => {
                 self.timetable = !self.timetable;
                 self.close_game_menu();
@@ -4361,7 +4456,7 @@ pub(crate) const SAVES: &str = "Saves";
 
 /// The lines of the game menu: (what, label). What can be set is on the pages behind
 /// "Options", "Vehicle options" and "World options" (see `game_lists`).
-pub(crate) const GAME_MENU: [(&str, &str); 14] = [
+pub(crate) const GAME_MENU: [(&str, &str); 15] = [
     ("resume", "Resume"),
     ("options", "Options..."),
     // (the driver's view - seat, field of view, head movement - straight from the pause
@@ -4369,6 +4464,8 @@ pub(crate) const GAME_MENU: [(&str, &str); 14] = [
     ("camera", "Camera..."),
     ("vehicle", "Vehicle options..."),
     ("world", "World options..."),
+    // (the workshop for a bus, see `crate::devmode`)
+    ("devmode", "Vehicle development..."),
     ("map", "City map"),
     ("duty", "Line and tour..."),
     ("skipstop", "Skip the next stop"),

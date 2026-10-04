@@ -16,6 +16,8 @@ pub(crate) enum ListKind {
     Vehicle(usize),
     /// The clock, the weather and the traffic, on this page.
     World(usize),
+    /// The vehicle development mode's own page (`crate::devmode`).
+    Dev(usize),
     Lines,
     /// A line's tours; the stop chosen in the timetable beside them to start from: (the
     /// tour's number, the stop as `Schedule::tour_stops` lists them), none: the default.
@@ -265,7 +267,7 @@ pub(crate) fn items(app: &App, kind: &ListKind) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     match kind {
         ListKind::Admin => return crate::admin::items(app),
-        ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_) => {
+        ListKind::Options(_) | ListKind::Vehicle(_) | ListKind::World(_) | ListKind::Dev(_) => {
             let Some((mut pages, tab)) = pages_of(app, kind) else { return out };
             if pages.is_empty() {
                 return vec![(row("Nothing to set here", 'i', "", "", None), "noop".to_string())];
@@ -470,6 +472,7 @@ pub(crate) fn menu_extras(
         ListKind::Options(_) => (MenuKind::Options, head("Options..."), None),
         ListKind::Vehicle(_) => (MenuKind::Options, head("Vehicle options..."), None),
         ListKind::World(_) => (MenuKind::Options, head("World options..."), None),
+        ListKind::Dev(_) => (MenuKind::Options, head("Vehicle development..."), None),
         ListKind::Lines => {
             let preview = action.strip_prefix("line ").and_then(|name| {
                 let line = schedule?.data.lines.iter().find(|l| l.name == name)?;
@@ -636,6 +639,17 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
             }
             Some(kind.clone())
         }
+        // (its sliders are the World window's, so they are set here as there; its buttons
+        // and its two typed fields are `App::page_action`, and the page stays open)
+        ListKind::Dev(_) => {
+            if verb == "noop" || option_do(app, verb, arg, mv) {
+                return Some(kind.clone());
+            }
+            if matches!(mv, Move::Next) && app.page_action(verb) {
+                return None;
+            }
+            Some(kind.clone())
+        }
         ListKind::Lines => match verb {
             "line" => {
                 Some(ListKind::Tours(arg.to_string(), None))
@@ -782,7 +796,7 @@ pub(crate) enum Move {
 type Page = (&'static str, Vec<(String, String)>);
 
 /// A row of a settings window (see `ui::MenuKind::Options` for the format).
-fn row(name: &str, kind: char, value: &str, desc: &str, frac: Option<f32>) -> String {
+pub(crate) fn row(name: &str, kind: char, value: &str, desc: &str, frac: Option<f32>) -> String {
     format!("{name}\u{1f}{kind}\u{1f}{value}\u{1f}{desc}\u{1f}{}", frac.map(|f| format!("{f:.3}")).unwrap_or_default())
 }
 
@@ -792,7 +806,7 @@ fn opens(name: &str, desc: &str, id: &str) -> (String, String) {
 }
 
 /// A row with a button that does something.
-fn button(name: &str, text: &str, desc: &str, id: &str) -> (String, String) {
+pub(crate) fn button(name: &str, text: &str, desc: &str, id: &str) -> (String, String) {
     (row(name, 'a', text, desc, None), id.to_string())
 }
 
@@ -803,13 +817,29 @@ fn switch_row(app: &App, id: &str, name: &str, desc: &str) -> Option<(String, St
 }
 
 /// A slider row for the setting `id` ("verb" or "verb arg"); `fmt` writes its value.
-fn slider_row(app: &App, id: &str, name: &str, desc: &str, fmt: &dyn Fn(f32) -> String) -> Option<(String, String)> {
+pub(crate) fn slider_row(app: &App, id: &str, name: &str, desc: &str, fmt: &dyn Fn(f32) -> String) -> Option<(String, String)> {
     let (verb, arg) = id.split_once(' ').unwrap_or((id, ""));
     let steps = steps_of(verb)?;
     let now = option_now(app, verb, arg)?;
     let i = nearest(&steps, now);
     let frac = if steps.len() > 1 { i as f32 / (steps.len() - 1) as f32 } else { 0.0 };
     Some((row(name, 'v', &fmt(now), desc, Some(frac)), id.to_string()))
+}
+
+/// What a slider setting stands at, and writing one: the development mode quietens the
+/// traffic, the passengers and the clock while it is on and puts them back afterwards.
+pub(crate) fn slider_now(app: &App, id: &str) -> Option<f32> {
+    let (verb, arg) = id.split_once(' ').unwrap_or((id, ""));
+    option_now(app, verb, arg)
+}
+
+pub(crate) fn set_slider(app: &mut App, id: &str, v: f32) {
+    let (verb, arg) = id.split_once(' ').unwrap_or((id, ""));
+    if let Some((k, value)) = option_set(app, verb, arg, v) {
+        remember_setting(k, &value);
+    }
+    sync_live(app);
+    LIST_DIRTY.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The values a slider's setting runs through.
@@ -2265,6 +2295,7 @@ fn pages_of(app: &App, kind: &ListKind) -> Option<(Vec<Page>, usize)> {
         ListKind::Options(t) => (options_pages(app), *t),
         ListKind::Vehicle(t) => (vehicle_pages(app), *t),
         ListKind::World(t) => (world_pages(app), *t),
+        ListKind::Dev(t) => (crate::devmode::pages(app), *t),
         _ => return None,
     };
     let pages: Vec<Page> = pages.into_iter().filter(|p| !p.1.is_empty()).collect();

@@ -22,6 +22,8 @@ pub(crate) struct App {
     pub(crate) chooser: Option<usize>,
     /// The object editor, while it is on (`crate::editor`).
     pub(crate) editor: Option<crate::editor::Editor>,
+    /// The vehicle development mode, while it is on (`crate::devmode`).
+    pub(crate) dev: Option<crate::devmode::DevMode>,
     pub(crate) vehicle_list: Vec<(String, String)>,
     /// The drop-down open over a row of the settings window, if one is.
     pub(crate) dropdown: Option<crate::game_lists::Dropdown>,

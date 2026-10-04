@@ -138,6 +138,19 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
+                // a variable name on the development page: its own text, for the same reason
+                if event.state == ElementState::Pressed
+                    && self.menu_edit.is_some()
+                    && !self.menu_edit_icao
+                    && matches!(self.list_kind, Some(crate::game_lists::ListKind::Dev(_)))
+                {
+                    if let Some(text) = event.text.as_deref() {
+                        if text.chars().any(|c| !c.is_control()) {
+                            self.dev_edit_text(text);
+                            return;
+                        }
+                    }
+                }
                 // '/' opens the chat's input box wherever the keyboard has it (the key
                 // itself is then swallowed by the chat) - but not Numpad ÷, OMSI's stock
                 // front door key (keyboard.cfg `bus_doorfront0 181`)
@@ -1746,6 +1759,10 @@ impl ApplicationHandler for App {
                     // (a preset picked in the paused menu: the change goes over in real time)
                     self.tick_weather(dt);
                 }
+                // the development mode's copy of a vehicle folder, when it is done
+                if self.dev.is_some() {
+                    crate::devmode::tick(self);
+                }
                 let daylight = omsi_sim::Daylight::compute(&self.clock, self.envir.as_ref());
                 if self.lamps_on != Some(daylight.lamps_on) {
                     self.lamps_on = Some(daylight.lamps_on);
@@ -1992,6 +2009,10 @@ impl ApplicationHandler for App {
                     // the object editor's keys, while it is on (one quiet line)
                     if self.editor.is_some() {
                         lines.push("Object editor: click picks · drag moves · wheel turns (Shift lifts) · Del · C copy · V variant · Backspace undo · Ctrl+S save · Esc".into());
+                    }
+                    // the same for the development mode (`crate::devmode`)
+                    if self.dev.is_some() {
+                        lines.push("Vehicle development: Esc › Vehicle development… for the page · Ctrl+Shift+D leaves it".into());
                     }
                     if let Some(d) = self.duty.as_ref().filter(|d| d.trip_done()) {
                         lines.push(match d.trips.get(d.trip_index + 1) {

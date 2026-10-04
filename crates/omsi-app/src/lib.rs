@@ -30,6 +30,7 @@ mod ambience;
 mod camera_arm;
 mod career;
 mod describe;
+mod devmode;
 mod editor;
 mod game_lists;
 mod rail_drive;
@@ -421,6 +422,8 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
     let clock_note = args.clock_moved.clone();
     // (as the last session left it, #1164)
     let info_bar = settings.info_bar;
+    // `--dev-vehicle`: the game opens as the workshop for a bus (`crate::devmode`)
+    let dev = args.dev_vehicle.then(crate::devmode::DevMode::default);
     let mut app = App {
         args,
         instance: graphics_instance(),
@@ -435,6 +438,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         placed: Vec::new(),
         chooser: None,
         editor: None,
+        dev,
         vehicle_list: Vec::new(),
         dropdown: None,
         vehicle_meta: std::collections::HashMap::new(),

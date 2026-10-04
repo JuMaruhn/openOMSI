@@ -475,6 +475,29 @@ and the timetable peaks at 1.93 GB instead of 8.75 GB (see `docs/ARCHITECTURE.md
 *Memory*). The game's log is `~/.openomsi/game.log` (the launcher's `launcher.log`
 beside it), and the first line of both is the build they were made from.
 
+## Vehicle development
+
+The game as the workshop for a bus: **Ctrl+Shift+D**, *Vehicle development...* in the game
+menu, or `--dev-vehicle` at the start. A bus is developed by driving it - its doors, switches,
+IBIS, sound and physics only answer in the game - so the page sits beside the bus being driven
+rather than in the launcher.
+
+While the mode is on the world is quiet: no traffic, no passengers and a clock that stands
+still, so that nothing but the bus moves. All three are put back as they were when the mode is
+left. The page has three tabs (**Tab** or **PageUp/PageDown** step through them):
+
+* **Vehicle** - which bus is loaded and where its files are; *Reload* reads them again (`.bus`,
+  model and sound configuration, scripts) and drives it on from where it stands, *Swap* puts
+  another bus in its place. A bus whose files are in the original installation cannot be
+  edited - openOMSI never writes there - so the page offers to **copy it into the content
+  folder**, which the game reads first; reload it afterwards and the copy is the one loaded,
+  and the one to edit. Whole folders are copied, never single files: a vehicle package is read
+  from one place only, so half a bus in the content folder would hide the other half.
+* **Variable** - a script variable of the bus written by hand: its name, a value, and what it
+  stands at now. The way to try what a script does without driving to the situation.
+* **World** - the traffic, the passengers and the clock speed as they stand, the next weather,
+  and the way to the full weather and time pages.
+
 ## Object editor
 
 A small part of what OMSI's map editor does, inside the game: **Ctrl+Shift+E** (or *Object
