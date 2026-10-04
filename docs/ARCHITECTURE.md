@@ -225,8 +225,11 @@ budget.
    it carries the variables over by name through the `Args` fields a situation uses. Its
    sound clips are forgotten too (`AudioEngine::forget_clips_under`), the script errors are a
    page of their own, and another lists the bus's files and its meshes with the variable that
-   moves each. Next there: a reload when those files are saved, and a finer path that redraws
-   only what changed. **(first pass)** 
+   moves each. The folder is watched while the mode asks for it (the newest change time under
+   it, looked for on a worker once a second, as the Lua plugin host watches its own), so a save
+   reads the bus again by itself. Next there: a rear section keeping its state as the leading
+   vehicle does, and a finer path that swaps only a changed texture (`replace_texture`) instead
+   of reading the whole bus. **(first pass)**
    Also: `[newanim]` blocks composed the way the original does (see docs/FORMATS.md) - the
    doors fold to the sides of the doorway again and every other two-stage part (gear
    selector, parking brake, sun blind, ignition key) sits where it belongs; people on foot

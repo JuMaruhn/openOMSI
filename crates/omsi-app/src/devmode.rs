@@ -21,6 +21,7 @@ use crate::game_lists as gl;
 use crate::App;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant, SystemTime};
 
 /// What the mode quietened when it was entered, to put back when it is left.
 struct Quieted {
@@ -40,11 +41,25 @@ pub(crate) struct DevMode {
     copying: Option<Receiver<Result<PathBuf, String>>>,
     /// What that copy is called while it runs, for the page to say.
     pub(crate) copying_name: String,
+    /// Watching the vehicle's files: saving one reads the bus again (see [`watch`]).
+    pub(crate) watch: bool,
+    /// The newest change time seen under its folder, the look that is under way on a worker,
+    /// and when the last one was asked for. None while nothing has been seen yet - the first
+    /// answer only sets the mark, it never reloads.
+    stamp: Option<SystemTime>,
+    looking: Option<Receiver<Option<SystemTime>>>,
+    looked: Option<Instant>,
 }
+
+/// How often the vehicle's folder is looked at. The Lua plugin host looks once a second and
+/// that has proved to be soon enough for a save to feel immediate (`omsi-plugin::lua`); a
+/// vehicle folder holds a few thousand files, so it is looked at no more often and on a
+/// worker - 1600 files cost some milliseconds, which is a frame.
+const WATCH_EVERY: Duration = Duration::from_secs(1);
 
 impl Default for DevMode {
     fn default() -> Self {
-        DevMode { quiet: None, var: String::new(), value: String::new(), typing_value: false, copying: None, copying_name: String::new() }
+        DevMode { quiet: None, var: String::new(), value: String::new(), typing_value: false, copying: None, copying_name: String::new(), watch: false, stamp: None, looking: None, looked: None }
     }
 }
 
@@ -101,6 +116,13 @@ pub(crate) fn pages(app: &App) -> Vec<(&'static str, Vec<(String, String)>)> {
             bus.push((gl::row("Vehicle", 'i', name.trim(), &p.vehicle.ty.def.path.to_string_lossy(), None), "noop".into()));
             bus.push(gl::button("Reload this vehicle", "Reload", "Read its files again (.bus, model, sound configuration, scripts, textures and meshes) and drive on with the state it has", "reload"));
             bus.push(gl::button("Reload it cold", "Cold", "The same, but the bus comes back as it is first put down - engine off, every variable at its start. What to try when a change does not seem to take", "reloadcold"));
+            let on = dev.is_some_and(|d| d.watch);
+            bus.push(gl::button(
+                "Reload when a file is saved",
+                if on { "On" } else { "Off" },
+                "Look at the vehicle's folder every second and read the bus again as soon as anything in it has been saved - a script, a texture, a mesh",
+                "devwatch",
+            ));
             bus.push(gl::button("Work on another vehicle", "Swap", "Put another vehicle in this one's place and drive it", "swap"));
             // where its files are, and whether they may be edited at all
             let dir = p.vehicle.ty.def.dir().to_path_buf();
@@ -296,9 +318,79 @@ fn quieten(app: &mut App) {
     gl::set_slider(app, "speed", 0.0);
 }
 
-/// Per frame: quieten the world once there is one, and pick the copy up when it is done.
+/// The newest change time of anything under `dir`. A vehicle is a folder of files that name
+/// each other - the `.bus`, the model and its meshes, the scripts, the textures - and a save
+/// may touch any of them, so the folder is taken as a whole rather than the files the bus
+/// happens to name today (a texture added while working on it would be in neither list).
+fn newest_change(dir: &Path) -> Option<SystemTime> {
+    fn walk(dir: &Path, best: &mut Option<SystemTime>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, best);
+            } else if let Ok(t) = e.metadata().and_then(|m| m.modified()) {
+                *best = Some(best.map_or(t, |b: SystemTime| b.max(t)));
+            }
+        }
+    }
+    let mut best = None;
+    walk(dir, &mut best);
+    best
+}
+
+/// Saving a file of the vehicle reads the bus again, with the state it had - the loop this
+/// mode is for: change a script in whatever editor, save, and the bus in front of you is the
+/// changed one, still running. The folder is looked at on a worker so that the look costs the
+/// picture nothing, and the first answer only sets the mark: nothing is read because the mode
+/// was turned on.
+fn watch(app: &mut App) {
+    let Some(d) = app.dev.as_ref() else { return };
+    if !d.watch || d.copying() || app.player.is_none() {
+        return;
+    }
+    // what the worker found, if it has finished
+    let found = d.looking.as_ref().and_then(|rx| rx.try_recv().ok());
+    if let Some(now) = found {
+        let Some(d) = app.dev.as_mut() else { return };
+        d.looking = None;
+        let before = d.stamp;
+        d.stamp = now;
+        // (the first look only marks where things stood)
+        if before.is_some() && now.is_some() && before != now {
+            // (the mark is set anew after the reload: the bus may come from another folder
+            // now, and the files are not touched by the reading itself)
+            d.stamp = None;
+            app.service_msg = Some((omsi_ui::tr("A file changed: reading the vehicle again").into_owned(), 3.0));
+            app.reload_driven_vehicle_keeping(true);
+            // (a page of the mode that is open shows the bus as it is now - the Scripts page
+            // above all, which is where a save that does not compile is read)
+            if app.list_kind.is_some() {
+                app.refresh_list();
+            }
+            return;
+        }
+    }
+    let Some(d) = app.dev.as_ref() else { return };
+    if d.looking.is_some() || d.looked.is_some_and(|t| t.elapsed() < WATCH_EVERY) {
+        return;
+    }
+    let Some(dir) = vehicle_folder(app) else { return };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(newest_change(&dir));
+    });
+    if let Some(d) = app.dev.as_mut() {
+        d.looking = Some(rx);
+        d.looked = Some(Instant::now());
+    }
+}
+
+/// Per frame: quieten the world once there is one, pick the copy up when it is done, and
+/// read the bus again when one of its files has been saved.
 pub(crate) fn tick(app: &mut App) {
     quieten(app);
+    watch(app);
     let done = match app.dev.as_mut().and_then(|d| d.copying.as_ref()) {
         Some(rx) => match rx.try_recv() {
             Ok(r) => Some(r),

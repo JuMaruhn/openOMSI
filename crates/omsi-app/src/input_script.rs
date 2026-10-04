@@ -3122,6 +3122,14 @@ impl App {
                 crate::devmode::start_copy(self);
                 return false;
             }
+            "devwatch" => {
+                if let Some(d) = self.dev.as_mut() {
+                    d.watch = !d.watch;
+                    let on = d.watch;
+                    self.service_msg = Some((omsi_ui::tr(if on { "The vehicle's files are watched: saving one reads the bus again" } else { "The vehicle's files are no longer watched" }).into_owned(), 4.0));
+                }
+                return false;
+            }
             "devworld" => self.open_list(crate::game_lists::ListKind::World(0)),
             "timetable" => {
                 self.timetable = !self.timetable;
