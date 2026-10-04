@@ -240,6 +240,13 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   list and narrows it as you type (two bus files of the same name are told apart by the file).
   It is the Drive page's own choice, so the bus you look at here is the bus that page would
   drive out - and while the list is open the keys search it rather than fly the camera.
+  The bus's **mirrors** are drawn here as the game draws them: each one is aimed from the eye
+  of the picture, the way Omsi.exe aims a mirror at whoever looks into it, so the glass shows
+  what it would show from that seat - and turning round the bus turns what its mirrors show.
+  They are aimed as you have aimed them in the cab (the mirror editor's turn, shift and field
+  of view, from `mirrors.cfg`), drawn at the size *Settings → Mirrors* asks for, and left
+  alone when that is *Off*. Only this page draws them; the card beside the bus list on the
+  Drive page stays the one cheap picture it has always been.
 
   This page and the Drive page keep their own camera: turning the bus here leaves the card
   beside the bus list where it was. They share the one bus, so the editor running its scripts

@@ -111,6 +111,17 @@ struct Ready {
     vt: Arc<omsi_sim::VehicleType>,
     vehicle: omsi_sim::VehicleInstance,
     scheme: Option<usize>,
+    mirrors: MirrorSetup,
+}
+
+/// How this bus's mirrors have been set in the cab: the same `mirrors.cfg` the game reads
+/// when it spawns the bus (`settings::mirror_offsets` and the two beside it, keyed by the
+/// vehicle file). A mirror aimed while driving is aimed the same way in the editor.
+#[derive(Default, Clone)]
+struct MirrorSetup {
+    offsets: Vec<[f32; 2]>,
+    shifts: Vec<[f32; 3]>,
+    fovs: Vec<f32>,
 }
 
 struct Shown {
@@ -126,6 +137,7 @@ struct Shown {
     length: f32,
     weather: omsi_content::weather::Weather,
     lighting: Lighting,
+    mirrors: MirrorSetup,
 }
 
 pub struct Showroom {
@@ -477,7 +489,13 @@ impl Showroom {
                 for t in &vehicle.trailers {
                     prefetch.prefetch(&t.ty, scheme.filter(|i| *i < t.ty.paint_schemes.len()));
                 }
-                Ok(Ready { look: l2, world, vt, vehicle, scheme })
+                // how the mirrors have been aimed in the cab (see [`MirrorSetup`])
+                let mirrors = MirrorSetup {
+                    offsets: crate::settings::mirror_offsets(&vt.def.path),
+                    shifts: crate::settings::mirror_shifts(&vt.def.path),
+                    fovs: crate::settings::mirror_fovs(&vt.def.path),
+                };
+                Ok(Ready { look: l2, world, vt, vehicle, scheme, mirrors })
             })();
             let _ = tx.send(r.map_err(|e| format!("{e:#}")));
         });
@@ -519,7 +537,7 @@ impl Showroom {
         }
         let lighting = lighting_for(&args, &weather, r.look.effects, &r.look.graphics);
         log::info!("showroom: {} ({} meshes, {:.1} m long) placed in {:.2} s", r.look.bus, render.instances.len(), length, t0.elapsed().as_secs_f64());
-        Shown { look: r.look, scene, world: Some(world), vehicle: Some(vehicle), render: Some(render), trailers, centre, length, weather, lighting }
+        Shown { look: r.look, scene, world: Some(world), vehicle: Some(vehicle), render: Some(render), trailers, centre, length, weather, lighting, mirrors: r.mirrors }
     }
 
     /// The picture of the bus at `w` x `h` pixels, drawn again when something changed.
@@ -609,6 +627,8 @@ impl Showroom {
         let standalone = s.look.effects;
         if standalone {
             renderer.instant_exposure = true;
+            // the bus's own mirrors first: the picture samples what they hold (see [`mirrors`])
+            mirrors(renderer, s, &cam, aspect);
         }
         renderer.render(&mut s.scene, target, w, h, &cam, &s.lighting);
         if standalone {
@@ -627,6 +647,38 @@ impl Showroom {
         self.shown.as_ref().map(|s| s.vehicle.is_some()).unwrap_or(false) && self.target.is_some()
     }
 
+}
+
+/// The bus's mirrors into their own textures (`reflexionN.bmp`), the way the game draws
+/// them: `camera_util::render_mirrors` is the game's pass, given the showroom's vehicle and
+/// scene instead of a player's (see `render_vehicle_mirrors`). Each mirror is aimed from the
+/// eye of the picture being drawn, as Omsi.exe aims them at whoever looks into the glass, so
+/// turning round the bus turns what its mirrors show; the glass itself is already a render
+/// texture in every scene (`scene::World::mirror_texture`), it was only never drawn into
+/// here, and a mirror then stood empty.
+///
+/// Only the Vehicle Editor pays for this. The card beside the bus list is a thumbnail of the
+/// bus's own body and keeps its one pass. The mirrors out of the picture are not redrawn, as
+/// the game leaves them (`mirror_in_view`), and `Mirrors: off` in the settings - the size 0
+/// that switches them off in the game - leaves them alone here too.
+///
+/// All of them are drawn at once, where the game takes turns among them over its frames: the
+/// showroom draws a picture only when something changed, so a bus standing still costs
+/// nothing, and a mirror a few frames behind the view being dragged would be the one thing
+/// the page is there to look at. (A seven-mirror bus: about 4 ms beside the 2 ms the picture
+/// itself takes, at the 256-pixel default.)
+fn mirrors(renderer: &mut Renderer, s: &mut Shown, cam: &Camera, aspect: f32) {
+    if crate::MIRROR_SIZE.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        return;
+    }
+    // (field by field: the pass wants the scene by itself while it reads the bus beside it)
+    let Shown { scene, vehicle, world, lighting, mirrors, .. } = s;
+    let (Some(v), Some(w)) = (vehicle.as_ref(), world.as_ref()) else { return };
+    if v.ty.def.cameras_reflexion.is_empty() {
+        return;
+    }
+    let aim = crate::camera_util::MirrorAim { offsets: &mirrors.offsets, shifts: &mirrors.shifts, fovs: &mirrors.fovs };
+    crate::camera_util::render_vehicle_mirrors(renderer, scene, w, v, aim, cam.position, lighting, None, Some((*cam, aspect)));
 }
 
 /// The light of the look's time and weather, with the sun's shadow under the bus. Always

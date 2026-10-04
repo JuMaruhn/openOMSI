@@ -550,7 +550,10 @@ windows. Each was traced to a general cause, most of them read off OMSI:
   replaced by the game's own window: `openomsi` without arguments opens it. The showroom is a
   scene of the game renderer (the bus placed by `World::add_vehicle` after a worker read it
   and put its textures on the GPU ahead; the game's sky and lighting of the chosen time and
-  weather; `player::sync_vehicle_transforms` shared with the player's bus); the interface
+  weather; `player::sync_vehicle_transforms` shared with the player's bus, and - on the
+  Vehicle Editor page - `camera_util::render_vehicle_mirrors`, the game's own mirror pass
+  given the showroom's vehicle instead of a player's, so the bus's `reflexionN.bmp` glass
+  shows what it would show in the cab); the interface
   is an immediate-mode toolkit on `omsi-ui` rendered into a premultiplied overlay texture.
   The data side kept its functions and `--cli`. Drawn at full rate with focus, ten times a
   second without, not at all while hidden. `OMSI_LAUNCHER_PAGE/SHOT/EXIT/INPUT`.

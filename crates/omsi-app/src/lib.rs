@@ -210,6 +210,9 @@ pub(crate) fn launcher_statics() {
     ENHANCED.store(s.enhanced || omsi_cfg::env::var_os("OMSI_ENHANCED").is_some(), std::sync::atomic::Ordering::Relaxed);
     CLASSIC.store(s.classic(), std::sync::atomic::Ordering::Relaxed);
     CLOUDS.store(s.clouds && omsi_cfg::env::var_os("OMSI_NO_CLOUDS").is_none(), std::sync::atomic::Ordering::Relaxed);
+    // the Vehicle Editor draws the bus's mirrors as the game does, at the size the settings
+    // ask for (0 = Mirrors off, and then they are not drawn there either)
+    MIRROR_SIZE.store(s.mirror_size, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Everything before a window: the language, the session's random seed, the original
