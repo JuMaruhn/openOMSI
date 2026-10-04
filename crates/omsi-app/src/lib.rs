@@ -34,6 +34,7 @@ mod camera_arm;
 mod career;
 mod describe;
 mod devmode;
+mod devpanel;
 mod editor;
 mod game_lists;
 mod rail_drive;
@@ -446,6 +447,7 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         chooser: None,
         editor: None,
         dev,
+        dev_panel: Default::default(),
         reload_at: None,
         reload_keep: None,
         vehicle_list: Vec::new(),

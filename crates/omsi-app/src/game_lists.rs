@@ -472,7 +472,7 @@ pub(crate) fn menu_extras(
         ListKind::Options(_) => (MenuKind::Options, head("Options..."), None),
         ListKind::Vehicle(_) => (MenuKind::Options, head("Vehicle options..."), None),
         ListKind::World(_) => (MenuKind::Options, head("World options..."), None),
-        ListKind::Dev(_) => (MenuKind::Options, head("Vehicle development..."), None),
+        ListKind::Dev(_) => (MenuKind::Options, head("Dev tools..."), None),
         ListKind::Lines => {
             let preview = action.strip_prefix("line ").and_then(|name| {
                 let line = schedule?.data.lines.iter().find(|l| l.name == name)?;

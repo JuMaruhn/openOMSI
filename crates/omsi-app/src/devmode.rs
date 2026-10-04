@@ -38,11 +38,6 @@ pub(crate) struct DevMode {
     /// the passengers and the clock go back the way they were.
     pub(crate) on: bool,
     quiet: Option<Quieted>,
-    /// The script variable the page writes, and the value typed for it.
-    pub(crate) var: String,
-    pub(crate) value: String,
-    /// Which of the two the typing goes into.
-    pub(crate) typing_value: bool,
     /// A copy of the vehicle's folder into the content folder, under way on a worker.
     copying: Option<Receiver<Result<PathBuf, String>>>,
     /// What that copy is called while it runs, for the page to say.
@@ -65,7 +60,7 @@ const WATCH_EVERY: Duration = Duration::from_secs(1);
 
 impl Default for DevMode {
     fn default() -> Self {
-        DevMode { on: false, quiet: None, var: String::new(), value: String::new(), typing_value: false, copying: None, copying_name: String::new(), watch: false, stamp: None, looking: None, looked: None }
+        DevMode { on: false, quiet: None, copying: None, copying_name: String::new(), watch: false, stamp: None, looking: None, looked: None }
     }
 }
 
@@ -116,139 +111,18 @@ pub(crate) fn copy_target(dir: &Path, content: &Path) -> PathBuf {
     content.join(rel)
 }
 
-/// The rows of the development page.
+/// The Dev tools page: the one switch, and nothing else. What the mode offers while it is on
+/// is a row of buttons over the picture (`crate::devpanel`), which is reached without opening
+/// a menu at all.
 pub(crate) fn pages(app: &App) -> Vec<(&'static str, Vec<(String, String)>)> {
-    let tr = |t: &str| omsi_ui::tr(t).into_owned();
-    let dev = app.dev.as_ref();
-    let mut bus: Vec<(String, String)> = Vec::new();
-    // the mode itself, first of all
-    let on = dev.is_some_and(|d| d.on);
-    bus.push(gl::button(
+    let on = app.dev.as_ref().is_some_and(|d| d.on);
+    let rows = vec![gl::button(
         "Vehicle development",
         if on { "On" } else { "Off" },
-        "On holds the world still around the bus - no traffic, no passengers, a clock that stands - and lets its files be watched. Off puts all three back the way they were. Ctrl+Shift+D does the same",
+        "On holds the world still around the bus - no traffic, no passengers, a clock that stands - puts its tools over the picture and takes the navigator away. Off puts all three back the way they were. Ctrl+Shift+D does the same",
         "devtoggle",
-    ));
-    match app.player.as_ref() {
-        Some(p) => {
-            let name = format!("{} {}", p.vehicle.ty.def.manufacturer.trim(), p.vehicle.ty.def.type_name.trim());
-            bus.push((gl::row("Vehicle", 'i', name.trim(), &p.vehicle.ty.def.path.to_string_lossy(), None), "noop".into()));
-            bus.push(gl::button("Reload this vehicle", "Reload", "Read its files again (.bus, model, sound configuration, scripts, textures and meshes) and drive on with the state it has", "reload"));
-            bus.push(gl::button("Reload it cold", "Cold", "The same, but the bus comes back as it is first put down - engine off, every variable at its start. What to try when a change does not seem to take", "reloadcold"));
-            let on = dev.is_some_and(|d| d.watch);
-            bus.push(gl::button(
-                "Reload when a file is saved",
-                if on { "On" } else { "Off" },
-                "Look at the vehicle's folder every second and read the bus again as soon as anything in it has been saved - a script, a texture, a mesh",
-                "devwatch",
-            ));
-            bus.push(gl::button("Work on another vehicle", "Swap", "Put another vehicle in this one's place and drive it", "swap"));
-            // where its files are, and whether they may be edited at all
-            let dir = p.vehicle.ty.def.dir().to_path_buf();
-            let installed = in_installation(&dir, &app.args.root);
-            if let Some(d) = dev.filter(|d| d.copying()) {
-                bus.push((gl::row("Copy", 'i', &tr("Copying..."), &d.copying_name, None), "noop".into()));
-            } else if installed {
-                bus.push(gl::button(
-                    "Copy this vehicle to the content folder",
-                    "Copy",
-                    "Its files are in the original installation, which is never written to. The copy is read before it, and is the one to edit",
-                    "devcopy",
-                ));
-            } else {
-                bus.push((gl::row("Files", 'i', &tr("Can be edited"), &dir.to_string_lossy(), None), "noop".into()));
-            }
-        }
-        None => bus.push((gl::row("Vehicle", 'i', &tr("None - you are on foot"), "", None), "noop".into())),
-    }
-
-    // a script variable by hand: what the launcher's wiper slider did, for every variable
-    let mut vars: Vec<(String, String)> = Vec::new();
-    if app.player.is_some() {
-        // the field being typed shows what is in the keyboard's hands, with a caret; the
-        // other one what it stands at
-        let editing = app.menu_edit.as_ref().and(dev.map(|d| d.typing_value));
-        let typed = |s: String, mine: bool| match editing {
-            Some(e) if e == mine => format!("{}_", app.menu_edit.clone().unwrap_or_default()),
-            _ if s.is_empty() => tr("(none)"),
-            _ => s,
-        };
-        let (name, value) = dev.map(|d| (d.var.clone(), d.value.clone())).unwrap_or_default();
-        let kind = |mine: bool| if editing == Some(mine) { 'E' } else { 'e' };
-        vars.push((gl::row("Variable", kind(false), &typed(name.clone(), false), "The name of a script variable of the vehicle (press Enter to type)", None), "devvar".into()));
-        vars.push((gl::row("Value", kind(true), &typed(value, true), "What to write into it (press Enter to type)", None), "devvalue".into()));
-        let now = app.player.as_ref().and_then(|p| p.vehicle.var(name.trim())).map(|v| format!("{v}")).unwrap_or_else(|| tr("not a variable of this bus"));
-        vars.push((gl::row("It stands at", 'i', &now, "", None), "noop".into()));
-        vars.push(gl::button("Write it", "Set", "Write the value into the variable now", "devset"));
-    }
-
-    // what the mode quietens, so it can be let go again without leaving the page. The
-    // weather and the clock are not here: the World window has them whole, and a second,
-    // smaller way to the same settings is one to keep in step for nothing.
-    let mut world: Vec<(String, String)> = Vec::new();
-    world.extend(gl::slider_row(app, "traffic", "Traffic", "How many vehicles drive around the map.", &|v| format!("{} vehicles", v as i64)));
-    world.extend(gl::slider_row(app, "pax", "Passengers", "How many passengers wait at the stops and ride.", &|v| format!("{:.0} %", v * 100.0)));
-    world.extend(gl::slider_row(app, "speed", "Time speed", "How fast the clock runs.", &|v| format!("{v} x")));
-
-    vec![("Vehicle", bus), ("Variable", vars), ("Files", files(app)), ("Scripts", errors(app)), ("World", world)]
-}
-
-/// What the bus is made of: the files it was read from, and the meshes with the variable
-/// that moves each. The list a reload goes over, and the one a watch would watch.
-fn files(app: &App) -> Vec<(String, String)> {
-    let tr = |t: &str| omsi_ui::tr(t).into_owned();
-    let mut out: Vec<(String, String)> = Vec::new();
-    let Some(p) = app.player.as_ref() else { return out };
-    let (def, model) = (&p.vehicle.ty.def, &p.vehicle.ty.model);
-    let dir = def.dir().to_path_buf();
-    // (under the vehicle's own folder, which is what the rows have room for)
-    let short = |path: &Path| path.strip_prefix(&dir).unwrap_or(path).to_string_lossy().to_string();
-    let named = |rel: &Option<String>| rel.clone().unwrap_or_default();
-    out.push((gl::row(&tr("Vehicle file"), 'i', &short(&def.path), &dir.to_string_lossy(), None), "noop".into()));
-    for (what, name) in [("Model", named(&def.model)), ("Sound", named(&def.sound)), ("Paths", named(&def.paths)), ("Passenger cabin", named(&def.passenger_cabin))] {
-        if !name.trim().is_empty() {
-            out.push((gl::row(what, 'i', name.trim(), "", None), "noop".into()));
-        }
-    }
-    let list = |what: &str, files: &[std::path::PathBuf], out: &mut Vec<(String, String)>| {
-        for (i, f) in files.iter().enumerate() {
-            let label = if i == 0 { what.to_string() } else { String::new() };
-            out.push((gl::row(&label, 'i', &short(f), "", None), "noop".into()));
-        }
-    };
-    list(&tr("Scripts"), &def.scripts.scripts, &mut out);
-    list(&tr("Constants"), &def.scripts.constfiles, &mut out);
-    list(&tr("Variable lists"), &def.scripts.varlists, &mut out);
-    list(&tr("String lists"), &def.scripts.stringvarlists, &mut out);
-    // the meshes, each with the variable that moves it: the map between a model and a script
-    out.push((gl::row(&tr("Meshes"), 'i', &format!("{}", model.meshes.len()), "", None), "noop".into()));
-    for m in model.meshes.iter().filter(|m| !m.file.trim().is_empty()) {
-        let moved: Vec<&str> = m.animations.iter().map(|a| a.variable.trim()).filter(|v| !v.is_empty()).collect();
-        let value = if moved.is_empty() { tr("still") } else { moved.join(", ") };
-        out.push((gl::row(m.file.trim(), 'i', &value, "", None), "noop".into()));
-    }
-    out
-}
-
-/// What the compiler made of the scripts: every error with its file and line, as
-/// `Program::errors` collects them. They were only ever in the log before, where a developer
-/// working on a script had to go and look for them.
-fn errors(app: &App) -> Vec<(String, String)> {
-    let tr = |t: &str| omsi_ui::tr(t).into_owned();
-    let mut out: Vec<(String, String)> = Vec::new();
-    let Some(p) = app.player.as_ref() else { return out };
-    let program = &p.vehicle.ty.program;
-    if program.errors.is_empty() {
-        out.push((gl::row(&tr("Scripts"), 'i', &tr("No errors"), &tr("Every script of this bus compiled"), None), "noop".into()));
-        return out;
-    }
-    out.push((gl::row(&tr("Script errors"), 'i', &format!("{}", program.errors.len()), "", None), "noop".into()));
-    // (a bus with a broken script can have hundreds: the first of them are the ones to read)
-    for e in program.errors.iter().take(40) {
-        let file = e.file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        out.push((gl::row(&format!("{file}:{}", e.line), 'i', &e.message, &e.file.to_string_lossy(), None), "noop".into()));
-    }
-    out
+    )];
+    vec![("Dev tools", rows)]
 }
 
 /// The page, whether or not the mode is on: opening it changes nothing by itself.
@@ -277,26 +151,6 @@ pub(crate) fn toggle(app: &mut App) {
     } else {
         app.service_msg = Some((omsi_ui::tr("Vehicle development on - the game menu has its page, Ctrl+Shift+D leaves it").into_owned(), 8.0));
     }
-}
-
-/// Write the typed value into the typed variable.
-pub(crate) fn set_variable(app: &mut App) {
-    let Some((name, value)) = app.dev.as_ref().map(|d| (d.var.trim().to_string(), d.value.trim().to_string())) else { return };
-    if name.is_empty() {
-        app.service_msg = Some((omsi_ui::tr("Name a variable first").into_owned(), 3.0));
-        return;
-    }
-    let Ok(v) = value.parse::<f32>() else {
-        app.service_msg = Some((format!("{}: {value}", omsi_ui::tr("That is not a number")), 3.0));
-        return;
-    };
-    let Some(p) = app.player.as_mut() else { return };
-    if p.vehicle.var(&name).is_none() {
-        app.service_msg = Some((format!("{} {name}", omsi_ui::tr("This bus has no variable")), 3.0));
-        return;
-    }
-    p.vehicle.set_var(&name, v);
-    app.service_msg = Some((format!("{name} = {v}"), 3.0));
 }
 
 /// Copy the driven vehicle's folder into the content folder, on a worker: a pack is large

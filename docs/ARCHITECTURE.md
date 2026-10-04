@@ -213,11 +213,13 @@ budget.
    battery age), and the depot chooser that tells the workshop whether the bus is standing
    in a depot. **(current)**
    Also: the **vehicle development mode** (`omsi-app::devmode`, Ctrl+Shift+D, `--dev-vehicle`)
-   - the game as the workshop for a bus: one page of the game menu for the bus loaded and its
-   files, the vehicle read again from them while it is driven (`reload_driven_vehicle`), a
-   script variable written by hand, and - while the mode itself is on, which the page's first
-   line and Ctrl+Shift+D switch both ways - the world quiet around it (traffic, passengers and
-   the clock put back when it goes off). A bus in the original installation is copied into the
+   - the game as the workshop for a bus. *Dev tools...* in the game menu holds the one switch
+   (Ctrl+Shift+D throws it too); while the mode is on the world is quiet around the bus
+   (traffic, passengers and the clock put back when it goes off), the navigator steps aside and
+   a row of icon buttons stands over the top left of the picture (`crate::devpanel`, drawn the
+   way the touch controls are: `omsi-ui` into a painter laid over the window) - read the bus
+   again (`reload_driven_vehicle`), read it cold, watch its files, work on another, copy it
+   where it may be edited, and what its scripts would not compile. A bus in the original installation is copied into the
    content folder first, whole, because a vehicle package is read from one root only.
    The reload lets the vehicle go **before** it reads it again, which is what takes its
    textures and meshes out of the world's caches (`VehicleRender::own_set`,

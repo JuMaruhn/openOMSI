@@ -24,6 +24,8 @@ pub(crate) struct App {
     pub(crate) editor: Option<crate::editor::Editor>,
     /// The vehicle development mode, while it is on (`crate::devmode`).
     pub(crate) dev: Option<crate::devmode::DevMode>,
+    /// The development tools' buttons over the picture (`crate::devpanel`).
+    pub(crate) dev_panel: crate::devpanel::DevPanel,
     /// A reload under way (`App::reload_driven_vehicle_keeping`): where the vehicle stood,
     /// and the variables it is to come back with. Both are taken by `place_vehicle`.
     pub(crate) reload_at: Option<(f64, f64, f64)>,

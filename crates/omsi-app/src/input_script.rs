@@ -1242,6 +1242,10 @@ impl App {
 
     pub(crate) fn on_left(&mut self, pressed: bool) {
         if self.vr_nav_edit.is_some() { return; }
+        // the development tools' buttons over the top left (`crate::devpanel`)
+        if self.game_menu.is_none() && self.dev_panel_click(pressed) {
+            return;
+        }
         // the object editor: the mouse picks and drags
         if self.game_menu.is_none() && self.editor_mouse(pressed) {
             return;
@@ -1620,8 +1624,6 @@ impl App {
                     if self.menu_edit.is_some() {
                         if self.menu_edit_icao {
                             self.icao_edit_text(text);
-                        } else if matches!(self.list_kind, Some(crate::game_lists::ListKind::Dev(_))) {
-                            self.dev_edit_text(text);
                         } else if matches!(self.list_kind, Some(crate::game_lists::ListKind::RouteNumbers)) {
                             self.route_edit_text(text);
                         } else {
@@ -1990,52 +1992,6 @@ impl App {
         self.refresh_list();
     }
 
-    /// A key while a name or a value is typed on the development page. The text itself
-    /// comes through `dev_edit_text`, so every keyboard layout reaches a variable name.
-    fn dev_edit_key(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Escape => self.menu_edit = None,
-            KeyCode::Backspace | KeyCode::Delete => {
-                if let Some(t) = self.menu_edit.as_mut() {
-                    t.pop();
-                }
-            }
-            KeyCode::Enter | KeyCode::NumpadEnter => {
-                if let Some(t) = self.menu_edit.take() {
-                    self.dev_edit_done(&t);
-                }
-            }
-            _ => {}
-        }
-        self.refresh_list();
-    }
-
-    pub(crate) fn dev_edit_text(&mut self, text: &str) {
-        if !matches!(self.list_kind, Some(crate::game_lists::ListKind::Dev(_))) || self.menu_edit.is_none() {
-            return;
-        }
-        if let Some(t) = self.menu_edit.as_mut() {
-            for c in text.chars().filter(|c| !c.is_control()) {
-                if t.chars().count() >= 64 {
-                    break;
-                }
-                t.push(c);
-            }
-        }
-        self.refresh_list();
-    }
-
-    /// What was typed goes into the field it was typed for.
-    pub(crate) fn dev_edit_done(&mut self, text: &str) {
-        if let Some(d) = self.dev.as_mut() {
-            if d.typing_value {
-                d.value = text.trim().to_string();
-            } else {
-                d.var = text.trim().to_string();
-            }
-        }
-    }
-
     /// Set the clock to the time typed (digits: hh, hhmm or hhmmss; what is missing is 0).
     pub(crate) fn apply_time_edit(&mut self) {
         let Some(d) = self.menu_edit.take() else { return };
@@ -2219,8 +2175,6 @@ impl App {
                 self.icao_edit_key(code);
             } else if matches!(self.list_kind, Some(crate::game_lists::ListKind::RouteNumbers)) {
                 self.route_edit_key(code);
-            } else if matches!(self.list_kind, Some(crate::game_lists::ListKind::Dev(_))) {
-                self.dev_edit_key(code);
             } else {
                 self.time_edit_key(code);
             }
@@ -2979,8 +2933,8 @@ impl App {
             }
             "vehicle" => self.open_list(crate::game_lists::ListKind::Vehicle(0)),
             "world" => self.open_list(crate::game_lists::ListKind::World(0)),
-            // (the page by itself changes nothing: its first line turns the mode on)
-            "devmode" => {
+            // (the page by itself changes nothing: its one line turns the mode on)
+            "devtools" => {
                 crate::devmode::open_page(self);
                 self.open_list(crate::game_lists::ListKind::Dev(0));
             }
@@ -3143,23 +3097,6 @@ impl App {
             "editor" => {
                 self.close_game_menu();
                 self.toggle_editor();
-            }
-            // the development page (`crate::devmode`): the two typed fields, the write and
-            // the copy stay on the page; the full weather and clock are the World window's
-            "devvar" | "devvalue" => {
-                // (what was typed belongs to the field it was typed for, even when the other
-                // one is picked to carry on with)
-                if let Some(t) = self.menu_edit.take() {
-                    self.dev_edit_done(&t);
-                }
-                let Some(d) = self.dev.as_mut() else { return false };
-                d.typing_value = id == "devvalue";
-                self.menu_edit = Some(if id == "devvalue" { d.value.clone() } else { d.var.clone() });
-                return false;
-            }
-            "devset" => {
-                crate::devmode::set_variable(self);
-                return false;
             }
             "devcopy" => {
                 crate::devmode::start_copy(self);
@@ -4716,7 +4653,7 @@ pub(crate) const GAME_MENU: [(&str, &str); 15] = [
     ("vehicle", "Vehicle options..."),
     ("world", "World options..."),
     // (the workshop for a bus, see `crate::devmode`)
-    ("devmode", "Vehicle development..."),
+    ("devtools", "Dev tools..."),
     ("map", "City map"),
     ("duty", "Line and tour..."),
     ("skipstop", "Skip the next stop"),

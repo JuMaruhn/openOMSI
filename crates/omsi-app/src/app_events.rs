@@ -60,6 +60,7 @@ impl ApplicationHandler for App {
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         self.surface = None;
         self.touch.drop_gpu();
+        self.dev_panel.drop_gpu();
         self.input_lost();
         self.save_last_situation();
     }
@@ -134,19 +135,6 @@ impl ApplicationHandler for App {
                     if let Some(text) = event.text.as_deref() {
                         if text.chars().any(|c| !c.is_control()) {
                             self.route_edit_text(text);
-                            return;
-                        }
-                    }
-                }
-                // a variable name on the development page: its own text, for the same reason
-                if event.state == ElementState::Pressed
-                    && self.menu_edit.is_some()
-                    && !self.menu_edit_icao
-                    && matches!(self.list_kind, Some(crate::game_lists::ListKind::Dev(_)))
-                {
-                    if let Some(text) = event.text.as_deref() {
-                        if text.chars().any(|c| !c.is_control()) {
-                            self.dev_edit_text(text);
                             return;
                         }
                     }
@@ -2109,10 +2097,6 @@ impl ApplicationHandler for App {
                     if self.editor.is_some() {
                         lines.push("Object editor: click picks · drag moves · wheel turns (Shift lifts) · Del · C copy · V variant · Backspace undo · Ctrl+S save · Esc".into());
                     }
-                    // the same for the development mode (`crate::devmode`), while it is on
-                    if self.dev.as_ref().is_some_and(|d| d.on) {
-                        lines.push("Vehicle development: Esc › Vehicle development… for the page · Ctrl+Shift+D leaves it".into());
-                    }
                     if let Some(d) = self.duty.as_ref().filter(|d| d.trip_done()) {
                         lines.push(match d.trips.get(d.trip_index + 1) {
                             Some(next) => format!(
@@ -2178,6 +2162,11 @@ impl ApplicationHandler for App {
                     ) {
                         let old_enabled = nav.enabled;
                         let old_opacity = nav.opacity;
+                        // (the development mode has the picture to itself: the navigator is
+                        // a driver's instrument, and nothing is being driven here)
+                        if self.dev.as_ref().is_some_and(|d| d.on) {
+                            nav.enabled = false;
+                        }
                         nav.cockpit_display = vr_active;
                         if vr_active {
                             nav.enabled = vr_nav_display.is_some_and(|d| d.placement.enabled);
@@ -2435,6 +2424,8 @@ impl ApplicationHandler for App {
                 if let Some(s) = self.surface.as_ref() {
                     let (w, h) = (s.config.width, s.config.height);
                     self.touch_prepare(w, h);
+                    let dpi = self.window.as_ref().map(|win| win.scale_factor() as f32).unwrap_or(1.0);
+                    self.dev_panel_prepare(w, h, dpi);
                 }
                 if let (Some(s), Some(r), Some(scene), Some(cam), Some(win)) = (
                     self.surface.as_ref(),
@@ -2461,6 +2452,11 @@ impl ApplicationHandler for App {
                                     if let Some(over) = self.touch.picture(r, s.config.width, s.config.height) {
                                         crate::touch::composite(&mut px, &over);
                                     }
+                                }
+                                // (and the development tools, which are part of what the
+                                // window shows while the mode is on)
+                                if let Some(over) = self.dev_panel.picture(r, s.config.width, s.config.height) {
+                                    crate::touch::composite(&mut px, &over);
                                 }
                                 image::save_buffer(
                                     &path,
@@ -2750,6 +2746,8 @@ impl ApplicationHandler for App {
                         }
                         // the on-screen controls over the picture (a phone)
                         self.touch.render(r, &view, s.config.width, s.config.height);
+                        // the development tools' buttons over everything (`crate::devpanel`)
+                        self.dev_panel.render(r, &view, s.config.width, s.config.height);
                         *self.profile.entry("render").or_default() += __t.elapsed().as_secs_f64();
                         if omsi_cfg::env::var_os("OMSI_PROFILE_GPU").is_some() {
                             // wait for the GPU here, so that its time shows as a stage of its own

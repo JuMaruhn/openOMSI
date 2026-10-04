@@ -532,48 +532,38 @@ beside it), and the first line of both is the build they were made from.
 
 ## Vehicle development
 
-The game as the workshop for a bus: *Vehicle development...* in the game menu opens its page,
-**Ctrl+Shift+D** and the page's first line turn the mode itself on and off, and `--dev-vehicle`
-starts the game with it on. The page is worth having either way - reading the bus again,
-writing a variable, looking at its files - and the mode is what holds the world still around
-it: no traffic, no passengers, a clock that stands, all three put back the way they were when
-it goes off. A bus is developed by driving it - its doors, switches,
-IBIS, sound and physics only answer in the game - so the page sits beside the bus being driven
+The game as the workshop for a bus: a bus is developed by driving it - its doors, switches,
+IBIS, sound and physics only answer in the game - so the tools sit beside the bus being driven
 rather than in the launcher.
 
-The page has five tabs (**Tab** or **PageUp/PageDown** step through them):
+*Dev tools...* in the game menu has the one switch, which **Ctrl+Shift+D** throws as well, and
+`--dev-vehicle` starts the game with it already on. While it is on the world is held still -
+no traffic, no passengers, a clock that stands, all three put back the way they were when it
+goes off - the navigator steps aside, and a row of buttons stands over the top left of the
+picture. Only an icon each; the name of the one under the cursor appears under the row.
 
-* **Vehicle** - which bus is loaded and where its files are; *Reload* reads them again - the
-  `.bus`, the model and sound configuration, the scripts, **and its textures and meshes** - and
-  drives it on from where it stands, **with the state it had**: the engine goes on running, the
-  doors stay open, the IBIS keeps its line. The values are carried over by their names, the way
-  a saved situation keeps them, because a varlist that gains or loses a line moves every place
-  after it. *Cold* does the same without carrying anything, which is what to try when a change
-  does not seem to take - a kept value can hide it. An articulated bus keeps its bend as well:
-  a rear section has no variables of its own, but it has where its turning axle stands, and
-  that is carried over - read again in a corner, it comes back in that corner. (A vehicle
-  coupled by hand is not coupled again; only what the `.bus` itself names comes back.)
-  *Swap* puts another bus in its place.
-  *Reload when a file is saved* turns the loop on: the vehicle's folder is looked at once a
+* **Reload** reads the vehicle's files again - the `.bus`, the model and sound configuration,
+  the scripts, **and its textures and meshes** - and drives it on from where it stands, **with
+  the state it had**: the engine goes on running, the doors stay open, the IBIS keeps its line.
+  The values are carried over by their names, the way a saved situation keeps them, because a
+  varlist that gains or loses a line moves every place after it. An articulated bus keeps its
+  bend as well: a rear section has no variables of its own, but it has where its turning axle
+  stands, and that is carried over - read again in a corner, it comes back in that corner. (A
+  vehicle coupled by hand is not coupled again; only what the `.bus` itself names comes back.)
+* **Reload it cold** does the same without carrying anything, which is what to try when a
+  change does not seem to take - a kept value can hide it.
+* **Reload when a file is saved** turns the loop on: the vehicle's folder is looked at once a
   second, and as soon as anything in it has been saved - a script, a texture, a mesh - the bus
   is read again by itself. Edit in whatever editor, save, and the bus in front of you is the
-  changed one, in the same view and still running. The camera stays where it was looking, and
-  an open page of the mode is drawn anew, so a save that will not compile puts its error on
-  the *Scripts* page at once. A bus whose files are in the original installation cannot be
-  edited - openOMSI never writes there - so the page offers to **copy it into the content
-  folder**, which the game reads first; reload it afterwards and the copy is the one loaded,
-  and the one to edit. Whole folders are copied, never single files: a vehicle package is read
-  from one place only, so half a bus in the content folder would hide the other half.
-* **Variable** - a script variable of the bus written by hand: its name, a value, and what it
-  stands at now. The way to try what a script does without driving to the situation.
-* **Files** - what the bus is made of: the `.bus`, the model, sound, path and cabin
-  configuration, every script, constant file and variable list, and its meshes with the
-  variable that moves each - the map between a model and its scripts.
-* **Scripts** - what the compiler made of them: every error with its file, its line and OMSI's
-  own message. They only ever went into the log before.
-* **World** - what the mode quietened: the traffic, the passengers and the clock speed, to let
-  any of them go again without leaving the page. The weather and the clock itself are not here;
-  *World options* has them whole.
+  changed one, in the same view and still running.
+* **Work on another vehicle** puts another bus in this one's place.
+* **Copy this vehicle to the content folder** appears for a bus whose files are in the original
+  installation, which openOMSI never writes to. The copy is read before the installation;
+  reload afterwards and it is the one loaded, and the one to edit. Whole folders are copied,
+  never single files: a vehicle package is read from one place only, so half a bus in the
+  content folder would hide the other half.
+* A bus whose scripts did not compile gets one more button, which says how many errors there
+  are and what the first of them is; clicking it puts them all in the log.
 
 ## Object editor
 
