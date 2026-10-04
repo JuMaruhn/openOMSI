@@ -111,6 +111,14 @@ pub(crate) fn pages(app: &App) -> Vec<(&'static str, Vec<(String, String)>)> {
     let tr = |t: &str| omsi_ui::tr(t).into_owned();
     let dev = app.dev.as_ref();
     let mut bus: Vec<(String, String)> = Vec::new();
+    // the mode itself, first of all: it is turned on by opening this page, and without a line
+    // for it the only way out was the key
+    bus.push(gl::button(
+        "Vehicle development",
+        if dev.is_some() { "On" } else { "Off" },
+        "Off puts the traffic, the passengers and the clock back the way they were and closes this page. Ctrl+Shift+D does the same",
+        "devtoggle",
+    ));
     match app.player.as_ref() {
         Some(p) => {
             let name = format!("{} {}", p.vehicle.ty.def.manufacturer.trim(), p.vehicle.ty.def.type_name.trim());

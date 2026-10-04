@@ -478,7 +478,8 @@ beside it), and the first line of both is the build they were made from.
 ## Vehicle development
 
 The game as the workshop for a bus: **Ctrl+Shift+D**, *Vehicle development...* in the game
-menu, or `--dev-vehicle` at the start. A bus is developed by driving it - its doors, switches,
+menu, or `--dev-vehicle` at the start. The first line of the page turns the mode off again (so
+does the key), which puts the world back the way it was. A bus is developed by driving it - its doors, switches,
 IBIS, sound and physics only answer in the game - so the page sits beside the bus being driven
 rather than in the launcher.
 

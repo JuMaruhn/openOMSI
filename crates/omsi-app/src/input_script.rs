@@ -3137,6 +3137,12 @@ impl App {
                 crate::devmode::start_copy(self);
                 return false;
             }
+            // the mode itself off (it is on whenever this page is open): the world goes back
+            // the way it was and the page goes with it
+            "devtoggle" => {
+                crate::devmode::toggle(self);
+                self.close_game_menu();
+            }
             "devwatch" => {
                 if let Some(d) = self.dev.as_mut() {
                     d.watch = !d.watch;
