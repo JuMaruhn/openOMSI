@@ -247,7 +247,9 @@ impl crate::App {
 
     /// Per frame: the row laid out and painted while the mode is on, nothing otherwise.
     pub(crate) fn dev_panel_prepare(&mut self, w: u32, h: u32, dpi: f32) {
-        if !self.dev.as_ref().is_some_and(|d| d.on) || self.game_menu.is_some() {
+        // (nothing over a menu or a list of its own: they are modal, and the row would be
+        // drawn over the card and take clicks meant for it)
+        if !self.dev.as_ref().is_some_and(|d| d.on) || self.game_menu.is_some() || self.chooser.is_some() {
             self.dev_panel.painter = Painter::new();
             self.dev_panel.buttons.clear();
             return;

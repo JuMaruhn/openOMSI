@@ -1579,8 +1579,9 @@ impl App {
                     let (press, release) = (arg != "up", arg != "down");
                     if self.placing.is_some() && self.game_menu.is_none() {
                         self.placing_click();
-                    } else if self.game_menu.is_some() {
-                        // (on the menu as the window's button: its lines, its arrows)
+                    } else if self.game_menu.is_some() || self.chooser.is_some() {
+                        // (on the menu or a list of its own as the window's button does it:
+                        // its lines, its arrows)
                         if press {
                             self.left_button(event_loop, true);
                         }

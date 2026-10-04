@@ -3126,7 +3126,10 @@ impl App {
             return;
         }
         // the game menu takes the clicks while it is open
-        if self.game_menu.is_some() {
+        // (a list of the menu is modal whether or not the menu itself is behind it: the
+        // development tools open the vehicle chooser straight from their buttons, and a click
+        // in it - on a bus, or on "Back" - was reaching nothing at all)
+        if self.game_menu.is_some() || self.chooser.is_some() {
             if state == ElementState::Pressed {
                 // (a tap or a click: only what is under the finger or the mouse is lit)
                 self.menu_kbd = false;
