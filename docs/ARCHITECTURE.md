@@ -217,10 +217,16 @@ budget.
    files, the vehicle read again from them while it is driven (`reload_driven_vehicle`), a
    script variable written by hand, and the world quiet around it (traffic, passengers and the
    clock put back when the mode is left). A bus in the original installation is copied into the
-   content folder first, whole, because a vehicle package is read from one root only. Next
-   there: the reload keeping the variables it had, the GPU caches of the player's vehicle given
-   back so a changed mesh or texture is seen at all, an outliner over the bus's files, and a
-   reload when they are saved. **(first pass)**
+   content folder first, whole, because a vehicle package is read from one root only.
+   The reload lets the vehicle go **before** it reads it again, which is what takes its
+   textures and meshes out of the world's caches (`VehicleRender::own_set`,
+   `World::release_own_set`: the player's set was never given back, so a changed `.o3d` or
+   `.dds` was served from the cache and every reload lost the memory of the one before), and
+   it carries the variables over by name through the `Args` fields a situation uses. Its
+   sound clips are forgotten too (`AudioEngine::forget_clips_under`), the script errors are a
+   page of their own, and another lists the bus's files and its meshes with the variable that
+   moves each. Next there: a reload when those files are saved, and a finer path that redraws
+   only what changed. **(first pass)** 
    Also: `[newanim]` blocks composed the way the original does (see docs/FORMATS.md) - the
    doors fold to the sides of the doorway again and every other two-stage part (gear
    selector, parking brake, sun blind, ignition key) sits where it belongs; people on foot

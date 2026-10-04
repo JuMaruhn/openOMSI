@@ -24,6 +24,10 @@ pub(crate) struct App {
     pub(crate) editor: Option<crate::editor::Editor>,
     /// The vehicle development mode, while it is on (`crate::devmode`).
     pub(crate) dev: Option<crate::devmode::DevMode>,
+    /// A reload under way (`App::reload_driven_vehicle_keeping`): where the vehicle stood,
+    /// and the variables it is to come back with. Both are taken by `place_vehicle`.
+    pub(crate) reload_at: Option<(f64, f64, f64)>,
+    pub(crate) reload_keep: Option<(Vec<(String, f32)>, Vec<(String, String)>)>,
     pub(crate) vehicle_list: Vec<(String, String)>,
     /// The drop-down open over a row of the settings window, if one is.
     pub(crate) dropdown: Option<crate::game_lists::Dropdown>,

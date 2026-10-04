@@ -439,6 +439,8 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
         chooser: None,
         editor: None,
         dev,
+        reload_at: None,
+        reload_keep: None,
         vehicle_list: Vec::new(),
         dropdown: None,
         vehicle_meta: std::collections::HashMap::new(),

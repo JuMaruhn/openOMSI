@@ -54,6 +54,17 @@ impl DevMode {
     }
 }
 
+/// Every variable and string variable of a vehicle, by name: what a reload carries over so
+/// the bus comes back running (`VehicleInstance::restore_script_state` puts them back by
+/// name, which is the only way that survives a varlist gaining or losing a line - the places
+/// in the `Program` move with it). A situation is kept the same way (`situation`).
+pub(crate) fn script_state_of(v: &omsi_sim::VehicleInstance) -> (Vec<(String, f32)>, Vec<(String, String)>) {
+    let p = &v.ty.program;
+    let vars = p.var_names.iter().enumerate().map(|(i, n)| (n.clone(), v.state.vars.get(i).copied().unwrap_or(0.0))).collect();
+    let strs = p.str_var_names.iter().enumerate().map(|(i, n)| (n.clone(), v.state.str_vars.get(i).cloned().unwrap_or_default())).collect();
+    (vars, strs)
+}
+
 /// The folder a bus's files live in, and whether it can be edited - that is, whether it
 /// lies outside the original installation (the content folder, a mod, an archive).
 pub(crate) fn vehicle_folder(app: &App) -> Option<PathBuf> {
@@ -88,7 +99,8 @@ pub(crate) fn pages(app: &App) -> Vec<(&'static str, Vec<(String, String)>)> {
         Some(p) => {
             let name = format!("{} {}", p.vehicle.ty.def.manufacturer.trim(), p.vehicle.ty.def.type_name.trim());
             bus.push((gl::row("Vehicle", 'i', name.trim(), &p.vehicle.ty.def.path.to_string_lossy(), None), "noop".into()));
-            bus.push(gl::button("Reload this vehicle", "Reload", "Read its files again (.bus, model and sound configuration, scripts) and drive it from here", "reload"));
+            bus.push(gl::button("Reload this vehicle", "Reload", "Read its files again (.bus, model, sound configuration, scripts, textures and meshes) and drive on with the state it has", "reload"));
+            bus.push(gl::button("Reload it cold", "Cold", "The same, but the bus comes back as it is first put down - engine off, every variable at its start. What to try when a change does not seem to take", "reloadcold"));
             bus.push(gl::button("Work on another vehicle", "Swap", "Put another vehicle in this one's place and drive it", "swap"));
             // where its files are, and whether they may be edited at all
             let dir = p.vehicle.ty.def.dir().to_path_buf();
@@ -284,6 +296,29 @@ mod tests {
         let dir = Path::new("/games/OMSI 2/Vehicles/MAN_SD200");
         let out = copy_target(dir, Path::new("/home/me/openOMSI"));
         assert_eq!(out, Path::new("/home/me/openOMSI/Vehicles/MAN_SD200"));
+    }
+
+    /// What a reload carries over is read and put back **by name**: a fresh instance of the
+    /// same bus comes back with the value it had, which is what lets the engine go on running
+    /// while a script is worked on. (Needs an installation; without one it says so and stops.)
+    #[test]
+    fn the_state_a_reload_carries_is_put_back_by_name() {
+        let root = omsi_cfg::env::var_os("OMSI_ROOT").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("../../../OMSI 2 Original"));
+        let bus = root.join("Vehicles/MAN_SD200/MAN_SD80.bus");
+        if !bus.exists() {
+            eprintln!("skipped: no {}", bus.display());
+            return;
+        }
+        let ty = std::sync::Arc::new(omsi_sim::VehicleType::load(&root, &bus).expect("the bus loads"));
+        let new = |ty: std::sync::Arc<omsi_sim::VehicleType>| omsi_sim::VehicleInstance::new(ty, omsi_sim::VehicleHost::new(omsi_sim::SimClock::default()));
+        let mut v = new(ty.clone());
+        v.set_var("Velocity", 12.5);
+        let (vars, strs) = script_state_of(&v);
+        assert!(vars.iter().any(|(n, x)| n.eq_ignore_ascii_case("Velocity") && *x == 12.5), "the value is in the snapshot");
+        let mut again = new(ty);
+        assert_ne!(again.var("Velocity"), Some(12.5), "a fresh bus starts cold");
+        again.restore_script_state(&vars, &strs);
+        assert_eq!(again.var("Velocity"), Some(12.5), "and comes back with what was kept");
     }
 
     /// What lies in the installation may not be written to; a mod or the content folder may.

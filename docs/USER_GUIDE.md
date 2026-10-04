@@ -486,9 +486,13 @@ While the mode is on the world is quiet: no traffic, no passengers and a clock t
 still, so that nothing but the bus moves. All three are put back as they were when the mode is
 left. The page has three tabs (**Tab** or **PageUp/PageDown** step through them):
 
-* **Vehicle** - which bus is loaded and where its files are; *Reload* reads them again (`.bus`,
-  model and sound configuration, scripts) and drives it on from where it stands, *Swap* puts
-  another bus in its place. A bus whose files are in the original installation cannot be
+* **Vehicle** - which bus is loaded and where its files are; *Reload* reads them again - the
+  `.bus`, the model and sound configuration, the scripts, **and its textures and meshes** - and
+  drives it on from where it stands, **with the state it had**: the engine goes on running, the
+  doors stay open, the IBIS keeps its line. The values are carried over by their names, the way
+  a saved situation keeps them, because a varlist that gains or loses a line moves every place
+  after it. *Cold* does the same without carrying anything, which is what to try when a change
+  does not seem to take - a kept value can hide it. *Swap* puts another bus in its place. A bus whose files are in the original installation cannot be
   edited - openOMSI never writes there - so the page offers to **copy it into the content
   folder**, which the game reads first; reload it afterwards and the copy is the one loaded,
   and the one to edit. Whole folders are copied, never single files: a vehicle package is read

@@ -2378,6 +2378,22 @@ impl App {
     /// scheme's name; None: at random) with the depot file `hof` (None: the map's).
     /// The driven vehicle read again from its files and put where it stands (#728).
     pub(crate) fn reload_driven_vehicle(&mut self) {
+        self.reload_driven_vehicle_keeping(true);
+    }
+
+    /// `keep`: the bus goes on with the variables it had, so the engine stays running, the
+    /// doors stay open and the IBIS keeps its line while a script is worked on. The values
+    /// are carried over **by name** (`VehicleInstance::restore_script_state`, the way a
+    /// situation keeps them), because their places in the `Program` move as soon as a
+    /// varlist gains or loses a line. Without `keep` the bus comes back cold, as it does
+    /// when it is first put down - which is what to try when a change does not seem to
+    /// take: a value kept can hide it.
+    ///
+    /// The vehicle is let go of **before** the new one is read. Its textures and meshes are
+    /// held by name in the world's caches, and only giving them back takes them out again
+    /// (`World::release_own_set`): read the other way round, the new vehicle found the old
+    /// pictures and meshes in the cache and a changed `.o3d` or `.dds` was never seen.
+    pub(crate) fn reload_driven_vehicle_keeping(&mut self, keep: bool) {
         let Some(p) = self.player.as_ref() else {
             self.service_msg = Some(("There is no vehicle to reload: you are on foot".into(), 3.0));
             return;
@@ -2389,12 +2405,63 @@ impl App {
         let paint = p.vehicle.host.paint_scheme.flatten().and_then(|i| p.vehicle.ty.paint_schemes.get(i)).map(|s| s.name.clone());
         // (the depot file by its file name, as `find_hof` looks for it)
         let hof = p.vehicle.host.hof.as_ref().and_then(|h| h.path.file_stem().map(|s| s.to_string_lossy().to_string()).or_else(|| Some(h.name.clone())));
-        let before = p.uid;
-        self.swap_pending = true;
+        let at = (p.vehicle.position.x, p.vehicle.position.y, p.vehicle.heading);
+        let state = keep.then(|| crate::devmode::script_state_of(&p.vehicle));
+        // (the head stays turned where it was looking: the reload is not a new seat)
+        let look = self.look;
+        let t0 = std::time::Instant::now();
+        // what the content folders hold is looked at again: a file that was not there when
+        // the bus was last read (a new texture, a new mesh) is found now
+        omsi_cfg::content_changed();
+        let dir = p.vehicle.ty.def.dir().to_path_buf();
+        self.drop_driven_vehicle();
+        // the sounds of this bus read anew as well: a clip is kept by its path and never
+        // looked at twice (`AudioEngine::forget_clips_under`)
+        if let Some(a) = self.audio.as_ref() {
+            let gone = a.forget_clips_under(&dir);
+            if gone > 0 {
+                log::info!("reload: {gone} sound clips of {} forgotten", dir.display());
+            }
+        }
+        self.reload_at = Some(at);
+        self.reload_keep = state;
         self.place_vehicle(&bus, paint, hof);
-        if let Some(p) = self.player.as_ref().filter(|p| p.uid != before) {
+        // (what was not placed leaves these behind)
+        self.reload_at = None;
+        self.reload_keep = None;
+        if let Some(p) = self.player.as_ref() {
             let name = format!("{} {}", p.vehicle.ty.def.manufacturer, p.vehicle.ty.def.type_name);
-            self.service_msg = Some((format!("Reloaded from its files: {}", name.trim()), 4.0));
+            let errors = p.vehicle.ty.program.errors.len();
+            self.look = look;
+            let how = if keep { "with the state it had" } else { "cold" };
+            log::info!("reload: {} read again {how} in {:.2} s, {errors} script errors", name.trim(), t0.elapsed().as_secs_f64());
+            self.service_msg = Some(match errors {
+                0 => (format!("Reloaded {how}: {}", name.trim()), 4.0),
+                n => (format!("Reloaded {how}: {} - {n} script errors (the Scripts page lists them)", name.trim()), 8.0),
+            });
+        }
+    }
+
+    /// The driven vehicle let go of without putting anybody on foot: its sounds stop, its
+    /// riders are evicted and its renders go back to the world (which is what frees its
+    /// textures and meshes). Only the reload uses it - it leaves the game without a player
+    /// for the moment it takes to read the bus again.
+    fn drop_driven_vehicle(&mut self) {
+        let Some(mut p) = self.player.take() else { return };
+        if let (Some(a), Some(mut ss)) = (self.audio.as_ref(), p.sounds.take()) {
+            ss.stop_all(a);
+        }
+        if let (Some(w), Some(r), Some(scene)) = (self.world.clone(), self.renderer.as_ref(), self.scene.as_mut()) {
+            if let Some(mut d) = p.driver.take() {
+                d.hide(r, scene);
+            }
+            if let Some(h) = self.humans.as_mut() {
+                h.evict(crate::humans::BusId::Player, &w);
+            }
+            w.release_vehicle(r, scene, p.render);
+            for t in p.trailer_renders {
+                w.release_vehicle(r, scene, t);
+            }
         }
     }
 
@@ -2427,7 +2494,10 @@ impl App {
 
     pub(crate) fn place_vehicle(&mut self, bus: &str, paint: Option<String>, hof: Option<String>) {
         // (in the driven vehicle's place, see `swap_pending`)
-        let swap = std::mem::take(&mut self.swap_pending) && self.player.is_some();
+        // a reload says where its vehicle stood and takes its place, even though there is no
+        // player for the moment (see `reload_driven_vehicle_keeping`)
+        let reload_at = self.reload_at.take();
+        let swap = (std::mem::take(&mut self.swap_pending) && self.player.is_some()) || reload_at.is_some();
         let name = self.vehicle_list.iter().find(|v| v.1 == bus).map(|v| v.0.clone()).unwrap_or_else(|| bus.to_string());
         // (a server's own buses only - its `vehicles` list, #1183 - whoever asks: the lists,
         // a plugin, the input script)
@@ -2438,6 +2508,7 @@ impl App {
         let bus = bus.to_string();
         let (Some(w), Some(r), Some(scene), Some(cam)) = (self.world.clone(), self.renderer.as_ref(), self.scene.as_mut(), self.camera.as_ref()) else { return };
         let (x, y, heading) = match (self.view.as_str(), self.player.as_ref()) {
+            _ if reload_at.is_some() => reload_at.unwrap(),
             (_, Some(p)) if swap => (p.vehicle.position.x, p.vehicle.position.y, p.vehicle.heading),
             ("free", _) | (_, None) => {
                 let f = cam.forward();
@@ -2452,11 +2523,12 @@ impl App {
                 (at.x, at.y, p.vehicle.heading)
             }
         };
+        let (keep_vars, keep_strs) = self.reload_keep.take().unwrap_or_default();
         let one = Args {
             bus: Some(bus.clone()),
             spawn: Some(format!("{x},{y},{heading}")),
-            situation_vars: Vec::new(),
-            situation_strvars: Vec::new(),
+            situation_vars: keep_vars,
+            situation_strvars: keep_strs,
             situation_others: Vec::new(),
             line: None,
             tour: None,
@@ -2975,6 +3047,11 @@ impl App {
             "reload" => {
                 self.close_game_menu();
                 self.reload_driven_vehicle();
+            }
+            // (the same, but the bus comes back as it is first put down)
+            "reloadcold" => {
+                self.close_game_menu();
+                self.reload_driven_vehicle_keeping(false);
             }
             "clearplaced" => {
                 self.close_game_menu();

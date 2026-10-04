@@ -572,6 +572,20 @@ impl AudioEngine {
     /// `unused`, once every ten seconds at most: the sounds of every vehicle that ever came
     /// into earshot stayed (140 MB around the Ahlheim main station). They are read again in
     /// the background when a vehicle comes back. Returns the bytes let go.
+    /// Forget every clip read from under `dir`, so the next sound read from there reads the
+    /// file again. The clips are kept by their path and never looked at twice otherwise;
+    /// the vehicle development mode asks for this when it reads a bus again, or a changed
+    /// `.wav` would go on playing as it was (`omsi-app::devmode`).
+    pub fn forget_clips_under(&self, dir: &std::path::Path) -> usize {
+        let mut gone = 0usize;
+        self.clips.lock().retain(|p, _| {
+            let keep = !p.starts_with(dir);
+            gone += usize::from(!keep);
+            keep
+        });
+        gone
+    }
+
     pub fn trim_clips(&self, unused: std::time::Duration) -> usize {
         {
             let mut last = self.last_trim.lock();
