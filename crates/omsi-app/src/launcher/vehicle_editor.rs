@@ -8,6 +8,11 @@
 //! `state.choice` fields the Drive page's day and weather step sets, which is what the
 //! showroom watches: the bus is not read again, only its light (see `Showroom::update`).
 //!
+//! Over the top left stand the four views and, beside them, the bus the page is about: one
+//! pill that opens every installed bus in a list and narrows it as it is typed into. It is
+//! the Drive page's own choice it sets (`State::select_bus`), because the showroom draws
+//! `choice.bus` - so the bus picked here is the bus that page would drive out.
+//!
 //! The picture is `Launcher::preview_full`, the stage the Drive page stands its bus on, and
 //! `showroom_pointer` gives the wheel and the cursor to the showroom once the panel has had
 //! the mouse. A drag on the panel is kept off the bus the same way, by `Ui::over_ui`.
@@ -16,7 +21,9 @@ use super::state::hhmm;
 use super::theme::*;
 use super::Launcher;
 use omsi_launcher_lib as core;
-use omsi_ui::Rect;
+use glam::Vec2;
+use omsi_ui::{Rect, Weight};
+use std::sync::Arc;
 use super::showroom::EditorCam;
 use winit::keyboard::KeyCode;
 
@@ -43,6 +50,13 @@ const VIEWS: [(EditorCam, &str, &str, &str); 4] = [
 /// the keys in another form, so they are kept as small as a control of this interface goes
 /// - the page is there to look at the bus, not at its buttons.
 const VIEW_BUTTON: f32 = 34.0;
+/// The view buttons and the gaps between them: what the strip holds before the bus pill.
+const VIEWS_W: f32 = VIEW_BUTTON * 4.0 + 12.0;
+/// The bus pill beside them: as wide as the name it shows, between these. A bus with a long
+/// name is cut rather than given the picture's whole width - the page is there to look at
+/// the bus, and the tooltip says the name in full.
+const PILL_MIN: f32 = 150.0;
+const PILL_MAX: f32 = 300.0;
 
 /// The renderers to choose between, as the Settings page names them and in its order.
 const MODES: [(&str, &str); 3] = [("vanilla", "Vanilla (as OMSI 2)"), ("vanilla_plus", "Vanilla+"), ("enhanced", "Enhanced")];
@@ -55,11 +69,22 @@ pub struct EditorView {
     pub graphics: String,
     /// How far the wipers have cleared their part of the panes (0..1, 1 = swept clean).
     pub wiped: f32,
+    /// The buses the chooser offers - file and the name shown - and how many vehicles were
+    /// known when it was built. Built once rather than every frame: an installation with its
+    /// add-ons has hundreds of them, and the list only changes when the content is read again
+    /// (the Drive page caches its own for the same reason, `bus_manufacturers`).
+    buses: Arc<Vec<(String, String)>>,
+    buses_key: usize,
 }
 
 impl Default for EditorView {
     fn default() -> Self {
-        EditorView { graphics: core::graphics_mode(&crate::settings::Settings::load().graphics).to_string(), wiped: 1.0 }
+        EditorView {
+            graphics: core::graphics_mode(&crate::settings::Settings::load().graphics).to_string(),
+            wiped: 1.0,
+            buses: Default::default(),
+            buses_key: usize::MAX,
+        }
     }
 }
 
@@ -124,6 +149,11 @@ fn stepped(view: EditorCam, by: i32, n: usize) -> EditorCam {
 /// turns about it: a camera that could be flown out of those would not be the view any
 /// more, and flying it under the floor is the first thing that happens.
 fn fly_keys(l: &mut super::Launcher, dt: f32) {
+    // not while the bus list is open: what is typed into it searches it, and "MAN" would
+    // otherwise fly the camera as well (`Ui::list_open`)
+    if l.ui.list_open() || l.ui.focus.is_some() {
+        return;
+    }
     let down = |c: KeyCode| l.held.contains(&c);
     let axis = |a: KeyCode, b: KeyCode| down(a) as i32 as f32 - down(b) as i32 as f32;
     let (fwd, right) = (axis(KeyCode::KeyW, KeyCode::KeyS), axis(KeyCode::KeyD, KeyCode::KeyA));
@@ -158,15 +188,102 @@ pub fn draw(l: &mut Launcher, r: Rect) {
     // it, so the showroom frames it in the middle (`focus` 0.5) rather than to one side
     fly_keys(l, l.ui.dt);
     l.preview_full(page, 0.5);
-    views(l, Rect::new(page.x + PANEL_PAD, page.y + PANEL_PAD, VIEW_BUTTON * 4.0 + 12.0 + 16.0, VIEW_BUTTON + 16.0));
+    top_strip(l, Rect::new(page.x + PANEL_PAD, page.y + PANEL_PAD, 0.0, VIEW_BUTTON + 16.0));
     buttons(l, panel);
     l.showroom_pointer(page);
+}
+
+/// The strip over the top left of the picture: the four views, then the bus the page is
+/// about. One panel holds both, so they read as the one row of controls the page has up
+/// there. `r`'s width is worked out from the name the pill has to show.
+fn top_strip(l: &mut Launcher, r: Rect) {
+    let buses = bus_list(l);
+    let name = chosen_name(&buses, &l.state.choice.bus);
+    // eased, so another bus with a shorter name slides the strip rather than snapping it
+    let want = (l.ui.width(&name, 13.0, Weight::Regular) + 46.0).clamp(PILL_MIN, PILL_MAX);
+    let pill = l.ui.anim(super::ui::id_of("editor-bus-width"), want, 0.08);
+    let strip = Rect::new(r.x, r.y, 8.0 + VIEWS_W + 8.0 + 22.0 + pill + 8.0, r.h);
+    l.ui.panel(strip);
+    views(l, strip);
+    let x = strip.x + 8.0 + VIEWS_W + 8.0;
+    l.ui.icon("directions_bus", Vec2::new(x + 10.0, strip.center().y), 19.0, TEXT_DIM);
+    bus(l, Rect::new(x + 22.0, strip.y + 8.0, pill, VIEW_BUTTON), &buses, &name);
+}
+
+/// The buses the chooser offers, by file and the name shown, built once (see
+/// [`EditorView::buses`]).
+fn bus_list(l: &mut Launcher) -> Arc<Vec<(String, String)>> {
+    if l.editor.buses_key != l.state.vehicles.len() {
+        l.editor.buses = Arc::new(bus_names(&l.state.vehicles));
+        l.editor.buses_key = l.state.vehicles.len();
+    }
+    l.editor.buses.clone()
+}
+
+/// Every installed bus as file and name, in the order the Drive page's list has them
+/// (`drive::bus_name_cmp`). The name is OMSI's own `[friendlyname]`, maker and type in one
+/// line; where two bus files carry the same one, the file's own name is put after it, as
+/// that page tells its variants apart (`build_bus_manufacturers`).
+fn bus_names(vehicles: &[core::VehicleInfo]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = vehicles.iter().map(|v| (v.file.clone(), core::display_bus_name(&v.name))).collect();
+    let mut counts = std::collections::HashMap::<String, usize>::new();
+    for (_, name) in &out {
+        *counts.entry(name.to_lowercase()).or_default() += 1;
+    }
+    for (file, name) in &mut out {
+        if counts[&name.to_lowercase()] > 1 {
+            let stem = std::path::Path::new(file).file_stem().unwrap_or_default().to_string_lossy().to_string();
+            *name = format!("{name} · {}", core::display_bus_name(&stem));
+        }
+    }
+    out.sort_by(|a, b| super::drive::bus_name_cmp(&a.1, &b.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
+/// The name of the chosen bus, or what the pill says instead: nothing is chosen yet, or the
+/// buses have not been read (the launcher reads them on a worker as it opens).
+fn chosen_name(buses: &[(String, String)], chosen: &str) -> String {
+    match buses.iter().find(|(f, _)| f == chosen) {
+        Some((_, name)) => name.clone(),
+        None if buses.is_empty() => omsi_ui::tr("Reading the buses…").into_owned(),
+        None => omsi_ui::tr("Choose a bus").into_owned(),
+    }
+}
+
+/// The bus pill: the installed buses in one list, typed into to narrow it (`Ui::select`
+/// searches what is open). Picking one is picking it on the Drive page - the showroom draws
+/// `choice.bus` and nothing else - so the bus looked at here is the bus that would drive out.
+fn bus(l: &mut Launcher, r: Rect, buses: &[(String, String)], name: &str) {
+    if buses.is_empty() {
+        l.ui.label(r.pad(10.0, 0.0), name);
+        return;
+    }
+    let chosen = buses.iter().position(|(f, _)| *f == l.state.choice.bus);
+    let mut options: Vec<String> = buses.iter().map(|(_, n)| n.clone()).collect();
+    // (none of them: the list leads with what the pill says, so clicking it is not a pick)
+    let offset = if chosen.is_none() {
+        options.insert(0, name.to_string());
+        1
+    } else {
+        0
+    };
+    let mut sel = chosen.map(|k| k + offset).unwrap_or(0);
+    if l.ui.select("editor-bus", r, &mut sel, &options) {
+        if let Some((file, _)) = sel.checked_sub(offset).and_then(|k| buses.get(k)) {
+            let file = file.clone();
+            l.state.select_bus(&file);
+        }
+    }
+    // (not while the list is open: it would stand over the very names being read)
+    if !l.ui.list_open() {
+        let file = l.state.choice.bus.clone();
+        l.ui.tooltip(r, &format!("{name}\n{file}\n{}", omsi_ui::tr("The bus to look at. Type to search the list.")));
+    }
 }
 
 /// The row of view buttons over the top left of the picture. Which one is on follows the
 /// camera, so the keys and the buttons never disagree.
 fn views(l: &mut Launcher, panel: Rect) {
-    l.ui.panel(panel);
     let now = l.showroom.view();
     for (i, (view, name, icon, key)) in VIEWS.iter().enumerate() {
         let r = Rect::new(panel.x + 8.0 + i as f32 * (VIEW_BUTTON + 4.0), panel.y + 8.0, VIEW_BUTTON, VIEW_BUTTON);
@@ -346,12 +463,60 @@ mod tests {
     }
 
     /// The names the time button offers are keys of the translation tables, so the page is
-    /// not English where the rest of the launcher is not.
+    /// not English where the rest of the launcher is not. So are the chooser's own strings.
     #[test]
     fn the_light_names_are_the_ones_the_translations_hold() {
         let yml = include_str!("../../locales/app.yml");
-        for name in LIGHTS {
+        let keys: Vec<&str> = LIGHTS
+            .iter()
+            .copied()
+            .chain(["Choose a bus", "Reading the buses…", "The bus to look at. Type to search the list."])
+            .collect();
+        for name in keys {
             assert!(yml.contains(&format!("\"{name}\":")), "{name} has no translations");
         }
+    }
+
+    fn vehicle(file: &str, name: &str) -> core::VehicleInfo {
+        core::VehicleInfo {
+            name: name.into(),
+            manufacturer: String::new(),
+            type_name: String::new(),
+            file: file.into(),
+            folder: String::new(),
+            description: String::new(),
+            default_paint: String::new(),
+            paints: Vec::new(),
+            hofs: Vec::new(),
+            installed: false,
+            missing_packs: Vec::new(),
+            numbers: Vec::new(),
+        }
+    }
+
+    /// The chooser names each bus by its `[friendlyname]`, underscores read as spaces, in the
+    /// Drive page's order (DL9 before DL10); two bus files of the same name are told apart by
+    /// the file, so neither of them is a line that picks the other.
+    #[test]
+    fn the_chooser_names_every_bus_once_and_in_order() {
+        let buses = bus_names(&[
+            vehicle("Vehicles/MAN_SD200/MAN_SD80.bus", "MAN SD200"),
+            vehicle("Vehicles/MAN_SD200/MAN_SD83.bus", "MAN SD200"),
+            vehicle("Vehicles/Berlin/DL10.bus", "Büssing DL10"),
+            vehicle("Vehicles/Berlin/DL9.bus", "Büssing_DL9"),
+        ]);
+        let names: Vec<&str> = buses.iter().map(|(_, n)| n.as_str()).collect();
+        assert_eq!(names, ["Büssing DL9", "Büssing DL10", "MAN SD200 \u{b7} MAN SD80", "MAN SD200 \u{b7} MAN SD83"]);
+        assert_eq!(buses[0].0, "Vehicles/Berlin/DL9.bus", "the file is kept beside the name");
+    }
+
+    /// The pill says what is chosen, and where nothing is - or nothing is read yet - what to
+    /// do instead.
+    #[test]
+    fn the_pill_says_which_bus_it_stands_at() {
+        let buses = bus_names(&[vehicle("Vehicles/MAN_SD200/MAN_SD80.bus", "MAN SD200")]);
+        assert_eq!(chosen_name(&buses, "Vehicles/MAN_SD200/MAN_SD80.bus"), "MAN SD200");
+        assert_eq!(chosen_name(&buses, "Vehicles/Other/Other.bus"), omsi_ui::tr("Choose a bus"));
+        assert_eq!(chosen_name(&[], ""), omsi_ui::tr("Reading the buses…"));
     }
 }

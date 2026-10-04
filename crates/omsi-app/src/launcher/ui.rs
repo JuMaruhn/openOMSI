@@ -367,6 +367,13 @@ impl Ui {
         self.layers.push((layer, Painter::with_scale(s), 0));
     }
 
+    /// Whether an open dropdown has the keyboard: what is typed into it narrows its list
+    /// (see [`Ui::begin`]), so a page that is steered by held keys - the Vehicle Editor's
+    /// camera - must stand still while one is open, or searching for "MAN" would fly it.
+    pub fn list_open(&self) -> bool {
+        self.popup.is_some()
+    }
+
     /// Whether a scroll area took this frame's wheel (what is left scrolls the page).
     pub fn wheel_taken(&self) -> bool {
         // (an open dropdown takes it where it lies, at the end of the frame: a finger

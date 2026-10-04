@@ -236,6 +236,10 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   a free camera back to the outside view, which is the way out of having flown off. The four
   views are also a row of small buttons over the top left of the picture - *Driver's seat*,
   *Saloon*, *Around the bus*, *Free camera* - each naming its key when the mouse rests on it.
+  Beside them stands the bus itself: one pill naming it, which opens every installed bus in a
+  list and narrows it as you type (two bus files of the same name are told apart by the file).
+  It is the Drive page's own choice, so the bus you look at here is the bus that page would
+  drive out - and while the list is open the keys search it rather than fly the camera.
 
   This page and the Drive page keep their own camera: turning the bus here leaves the card
   beside the bus list where it was. They share the one bus, so the editor running its scripts

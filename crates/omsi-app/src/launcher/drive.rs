@@ -688,8 +688,9 @@ fn build_bus_manufacturers(vehicles: &[omsi_launcher_lib::VehicleInfo], allowed:
 }
 
 /// Sort numeric runs wherever they occur: DL9 precedes DL10; case does not change
-/// a manufacturer's position.
-fn bus_name_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+/// a manufacturer's position. (The Vehicle Editor's chooser orders its own flat list of
+/// buses with it, so the two pages name them in the same order.)
+pub(super) fn bus_name_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let a = a.to_lowercase();
     let b = b.to_lowercase();
