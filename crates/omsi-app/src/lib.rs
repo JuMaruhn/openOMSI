@@ -422,8 +422,9 @@ pub(crate) fn make_app(mut args: Args, server_cfg: Option<server::ServerCfg>) ->
     let clock_note = args.clock_moved.clone();
     // (as the last session left it, #1164)
     let info_bar = settings.info_bar;
-    // `--dev-vehicle`: the game opens as the workshop for a bus (`crate::devmode`)
-    let dev = args.dev_vehicle.then(crate::devmode::DevMode::default);
+    // `--dev-vehicle`: the game opens as the workshop for a bus, the mode already on
+    // (`crate::devmode`)
+    let dev = args.dev_vehicle.then(crate::devmode::DevMode::started);
     let mut app = App {
         args,
         instance: graphics_instance(),

@@ -215,8 +215,9 @@ budget.
    Also: the **vehicle development mode** (`omsi-app::devmode`, Ctrl+Shift+D, `--dev-vehicle`)
    - the game as the workshop for a bus: one page of the game menu for the bus loaded and its
    files, the vehicle read again from them while it is driven (`reload_driven_vehicle`), a
-   script variable written by hand, and the world quiet around it (traffic, passengers and the
-   clock put back when the mode is left). A bus in the original installation is copied into the
+   script variable written by hand, and - while the mode itself is on, which the page's first
+   line and Ctrl+Shift+D switch both ways - the world quiet around it (traffic, passengers and
+   the clock put back when it goes off). A bus in the original installation is copied into the
    content folder first, whole, because a vehicle package is read from one root only.
    The reload lets the vehicle go **before** it reads it again, which is what takes its
    textures and meshes out of the world's caches (`VehicleRender::own_set`,

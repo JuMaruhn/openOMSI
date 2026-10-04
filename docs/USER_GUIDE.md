@@ -477,15 +477,16 @@ beside it), and the first line of both is the build they were made from.
 
 ## Vehicle development
 
-The game as the workshop for a bus: **Ctrl+Shift+D**, *Vehicle development...* in the game
-menu, or `--dev-vehicle` at the start. The first line of the page turns the mode off again (so
-does the key), which puts the world back the way it was. A bus is developed by driving it - its doors, switches,
+The game as the workshop for a bus: *Vehicle development...* in the game menu opens its page,
+**Ctrl+Shift+D** and the page's first line turn the mode itself on and off, and `--dev-vehicle`
+starts the game with it on. The page is worth having either way - reading the bus again,
+writing a variable, looking at its files - and the mode is what holds the world still around
+it: no traffic, no passengers, a clock that stands, all three put back the way they were when
+it goes off. A bus is developed by driving it - its doors, switches,
 IBIS, sound and physics only answer in the game - so the page sits beside the bus being driven
 rather than in the launcher.
 
-While the mode is on the world is quiet: no traffic, no passengers and a clock that stands
-still, so that nothing but the bus moves. All three are put back as they were when the mode is
-left. The page has three tabs (**Tab** or **PageUp/PageDown** step through them):
+The page has five tabs (**Tab** or **PageUp/PageDown** step through them):
 
 * **Vehicle** - which bus is loaded and where its files are; *Reload* reads them again - the
   `.bus`, the model and sound configuration, the scripts, **and its textures and meshes** - and

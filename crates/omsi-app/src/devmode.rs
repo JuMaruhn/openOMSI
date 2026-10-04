@@ -32,6 +32,11 @@ struct Quieted {
 }
 
 pub(crate) struct DevMode {
+    /// The mode itself. The page can be opened without it - reading the bus again, writing a
+    /// variable and looking at its files are worth having at any time - and this says whether
+    /// the world is held still around the bus and its files watched. Off again, the traffic,
+    /// the passengers and the clock go back the way they were.
+    pub(crate) on: bool,
     quiet: Option<Quieted>,
     /// The script variable the page writes, and the value typed for it.
     pub(crate) var: String,
@@ -60,11 +65,16 @@ const WATCH_EVERY: Duration = Duration::from_secs(1);
 
 impl Default for DevMode {
     fn default() -> Self {
-        DevMode { quiet: None, var: String::new(), value: String::new(), typing_value: false, copying: None, copying_name: String::new(), watch: false, stamp: None, looking: None, looked: None }
+        DevMode { on: false, quiet: None, var: String::new(), value: String::new(), typing_value: false, copying: None, copying_name: String::new(), watch: false, stamp: None, looking: None, looked: None }
     }
 }
 
 impl DevMode {
+    /// The mode already on, as `--dev-vehicle` asks for it.
+    pub(crate) fn started() -> DevMode {
+        DevMode { on: true, ..Default::default() }
+    }
+
     pub(crate) fn copying(&self) -> bool {
         self.copying.is_some()
     }
@@ -111,12 +121,12 @@ pub(crate) fn pages(app: &App) -> Vec<(&'static str, Vec<(String, String)>)> {
     let tr = |t: &str| omsi_ui::tr(t).into_owned();
     let dev = app.dev.as_ref();
     let mut bus: Vec<(String, String)> = Vec::new();
-    // the mode itself, first of all: it is turned on by opening this page, and without a line
-    // for it the only way out was the key
+    // the mode itself, first of all
+    let on = dev.is_some_and(|d| d.on);
     bus.push(gl::button(
         "Vehicle development",
-        if dev.is_some() { "On" } else { "Off" },
-        "Off puts the traffic, the passengers and the clock back the way they were and closes this page. Ctrl+Shift+D does the same",
+        if on { "On" } else { "Off" },
+        "On holds the world still around the bus - no traffic, no passengers, a clock that stands - and lets its files be watched. Off puts all three back the way they were. Ctrl+Shift+D does the same",
         "devtoggle",
     ));
     match app.player.as_ref() {
@@ -241,19 +251,32 @@ fn errors(app: &App) -> Vec<(String, String)> {
     out
 }
 
-/// Enter or leave the mode. Entering quietens the world, leaving puts it back.
+/// The page, whether or not the mode is on: opening it changes nothing by itself.
+pub(crate) fn open_page(app: &mut App) {
+    if app.dev.is_none() {
+        app.dev = Some(DevMode::default());
+    }
+}
+
+/// Turn the mode on or off. On holds the world still, off puts it back the way it was; what
+/// was typed on the page and whether its files are watched stay either way, so that turning
+/// it off and on again is not the same as starting over.
 pub(crate) fn toggle(app: &mut App) {
-    if let Some(mut d) = app.dev.take() {
-        if let Some(q) = d.quiet.take() {
+    open_page(app);
+    let on = app.dev.as_ref().is_some_and(|d| d.on);
+    if let Some(d) = app.dev.as_mut() {
+        d.on = !on;
+    }
+    if on {
+        if let Some(q) = app.dev.as_mut().and_then(|d| d.quiet.take()) {
             gl::set_slider(app, "traffic", q.traffic);
             gl::set_slider(app, "pax", q.pax);
             gl::set_slider(app, "speed", q.speed);
         }
         app.service_msg = Some((omsi_ui::tr("Vehicle development off").into_owned(), 3.0));
-        return;
+    } else {
+        app.service_msg = Some((omsi_ui::tr("Vehicle development on - the game menu has its page, Ctrl+Shift+D leaves it").into_owned(), 8.0));
     }
-    app.dev = Some(DevMode::default());
-    app.service_msg = Some((omsi_ui::tr("Vehicle development on - the game menu has its page, Ctrl+Shift+D leaves it").into_owned(), 8.0));
 }
 
 /// Write the typed value into the typed variable.
@@ -314,7 +337,7 @@ pub(crate) fn start_copy(app: &mut App) {
 /// stood at is kept and put back when the mode is left - they are the player's settings,
 /// not the mode's.
 fn quieten(app: &mut App) {
-    if app.dev.as_ref().is_none_or(|d| d.quiet.is_some()) {
+    if app.dev.as_ref().is_none_or(|d| !d.on || d.quiet.is_some()) {
         return;
     }
     let now = |id: &str| gl::slider_now(app, id);
@@ -355,7 +378,7 @@ fn newest_change(dir: &Path) -> Option<SystemTime> {
 /// was turned on.
 fn watch(app: &mut App) {
     let Some(d) = app.dev.as_ref() else { return };
-    if !d.watch || d.copying() || app.player.is_none() {
+    if !d.on || !d.watch || d.copying() || app.player.is_none() {
         return;
     }
     // what the worker found, if it has finished

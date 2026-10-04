@@ -2949,11 +2949,9 @@ impl App {
             }
             "vehicle" => self.open_list(crate::game_lists::ListKind::Vehicle(0)),
             "world" => self.open_list(crate::game_lists::ListKind::World(0)),
-            // (the page is the mode: opening it turns the mode on if it is off)
+            // (the page by itself changes nothing: its first line turns the mode on)
             "devmode" => {
-                if self.dev.is_none() {
-                    crate::devmode::toggle(self);
-                }
+                crate::devmode::open_page(self);
                 self.open_list(crate::game_lists::ListKind::Dev(0));
             }
             "copycode" => {
@@ -3137,11 +3135,9 @@ impl App {
                 crate::devmode::start_copy(self);
                 return false;
             }
-            // the mode itself off (it is on whenever this page is open): the world goes back
-            // the way it was and the page goes with it
             "devtoggle" => {
                 crate::devmode::toggle(self);
-                self.close_game_menu();
+                return false;
             }
             "devwatch" => {
                 if let Some(d) = self.dev.as_mut() {

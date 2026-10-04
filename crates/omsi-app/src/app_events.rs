@@ -2010,8 +2010,8 @@ impl ApplicationHandler for App {
                     if self.editor.is_some() {
                         lines.push("Object editor: click picks · drag moves · wheel turns (Shift lifts) · Del · C copy · V variant · Backspace undo · Ctrl+S save · Esc".into());
                     }
-                    // the same for the development mode (`crate::devmode`)
-                    if self.dev.is_some() {
+                    // the same for the development mode (`crate::devmode`), while it is on
+                    if self.dev.as_ref().is_some_and(|d| d.on) {
                         lines.push("Vehicle development: Esc › Vehicle development… for the page · Ctrl+Shift+D leaves it".into());
                     }
                     if let Some(d) = self.duty.as_ref().filter(|d| d.trip_done()) {
