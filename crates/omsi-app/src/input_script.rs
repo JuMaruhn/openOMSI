@@ -2139,7 +2139,9 @@ impl App {
     pub(crate) fn list_adjust(&mut self, k: usize, mv: crate::game_lists::Move) {
         use crate::game_lists::ListKind;
         let Some(kind) = self.list_kind.clone() else { return };
-        if !matches!(kind, ListKind::Options(_) | ListKind::World(_)) {
+        // (the windows whose rows hold a value: a click on a slider's track or a stepper, the
+        // arrows, and the drag that follows the cursor from there)
+        if !matches!(kind, ListKind::Options(_) | ListKind::World(_) | ListKind::Dev(_)) {
             return;
         }
         let Some(action) = self.admin_list.as_ref().and_then(|l| l.get(k)).map(|x| x.1.clone()) else { return };
