@@ -202,3 +202,80 @@ fn mapped_splines_and_objects_use_uncut_base_while_ground_keeps_paint() {
         assert!(!instance.ground_layer);
     }
 }
+
+/// #954: a route arrow the map's author put up (a `[helparrow]` object) is placed with its
+/// tile but drawn only while OMSI 2's route arrows are on, and goes with its tile.
+#[test]
+#[ignore = "requires a graphics adapter; uploads an isolated synthetic tile"]
+fn a_maps_own_route_arrow_shows_only_with_the_route_arrows() {
+    let fixture = Fixture::new();
+    fixture.write("global.cfg", "[name]\nRoute arrow regression\n");
+    fixture.write(
+        "arrow.sco",
+        "[groups]\n1\nUtilities\n[friendlyname]\nRoute Arrow Left\n[helparrow]\n[nocollision]\n[mesh]\narrow.x\n",
+    );
+    fixture.write("arrow.x", r#"xof 0303txt 0032
+        Mesh arrow {
+            3; 0;0;2;, 1;0;2;, 0;1;2;;
+            1; 3;0,1,2;;
+            MeshMaterialList {1;1;0;; Material {1;1;1;1;;0;0;0;0;;0;0;0;;}}
+        }
+    "#);
+    let world = World::open(&fixture.0, &fixture.0.join("global.cfg"), 20261001).unwrap();
+    let object = world.object_type("arrow.sco").expect("synthetic route arrow must load");
+    assert!(object.sco.is_help_arrow);
+    let instance = crate::graphics_instance();
+    let renderer = pollster::block_on(Renderer::new_with(
+        &instance,
+        None,
+        Some(wgpu::TextureFormat::Rgba8UnormSrgb),
+        omsi_render::RenderOptions { msaa: 1, shadow_size: 1024, ..Default::default() },
+    ))
+    .expect("test renderer");
+    let mut scene = renderer.new_scene();
+    let prepared = Prepared {
+        tx: 0,
+        ty: 0,
+        terrain: Some(triangle(0.0)),
+        paint_masks: Vec::new(),
+        paint: Vec::new(),
+        water: None,
+        ground_splines: Vec::new(),
+        splines: Vec::new(),
+        objects: vec![PlacedObject {
+            ot: object,
+            pos: DVec3::new(5.0, 5.0, 0.0),
+            xf: Mat4::IDENTITY,
+            lamp: None,
+            map_id: 1,
+            key: 1,
+            controller: None,
+            strings: vec!["Krankenhs.".into()],
+            warped: None,
+            var_parent: None,
+            parked: false,
+            editable: false,
+            script: None,
+        }],
+        trees: Vec::new(),
+        origin: DVec3::ZERO,
+        light_map: None,
+        cut: None,
+        images: Arc::new(HashMap::new()),
+    };
+    let mut upload = world.begin_upload(prepared);
+    while !world.upload_step(&renderer, &mut scene, &mut upload, None) {}
+    while !world.place_step(&renderer, &mut scene, &mut upload, None) {}
+    world.commit_upload(upload, &mut LoadStats::default());
+    let arrows = world.help_arrows.lock().get(&(0, 0)).cloned().unwrap_or_default();
+    assert!(!arrows.is_empty(), "the arrow is put up with its tile");
+    let shown = |scene: &Scene| arrows.iter().map(|i| scene.instances[*i].visible).collect::<Vec<_>>();
+    assert!(shown(&scene).iter().all(|v| !v), "hidden while the route arrows are off");
+    assert!(arrows.iter().all(|i| !scene.instances[*i].casts_shadow));
+    world.show_help_arrows(&renderer, &mut scene, true);
+    assert!(shown(&scene).iter().all(|v| *v), "drawn once they are switched on");
+    world.show_help_arrows(&renderer, &mut scene, false);
+    assert!(shown(&scene).iter().all(|v| !v), "hidden again once they are off");
+    world.unload_tile(&renderer, &mut scene, (0, 0), None);
+    assert!(world.help_arrows.lock().is_empty(), "the tile's arrows go with it");
+}

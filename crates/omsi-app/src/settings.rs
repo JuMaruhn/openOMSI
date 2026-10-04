@@ -152,6 +152,9 @@ pub struct Settings {
     /// The notes in the top left corner: why the bus does not move, the change due, what a
     /// service did (off, none are shown).
     pub notes: bool,
+    /// The information bar along the top (Shift+Y, the menu, the touch panel's button): as
+    /// it was left, not switched on again every session (#1164).
+    pub info_bar: bool,
     /// The size of the game's interface over the picture - texts, the menu, the timetable,
     /// the navigator - on top of the screen's own scale and the window's height (see
     /// `ui::size_factor`): 0.5 .. 2 (1 = as designed).
@@ -235,6 +238,9 @@ pub struct Settings {
     /// held while the mouse steers fires `toggel_mouse_ctrl`). Off by default: looking
     /// round with the right button dragged switched it off every time.
     pub mouse_right_off: bool,
+    /// The mouse steering's wheel and pedals ease after the cursor (~60 ms); off, they follow
+    /// it at once, as in Omsi.exe (#1092).
+    pub mouse_smooth: bool,
     /// How fast the view turns for the mouse's way while looking round (1 = Omsi.exe's
     /// field of view / 78.75 degrees per pixel in the views of the bus; #859).
     pub look_sens: f32,
@@ -321,7 +327,7 @@ impl Settings {
     }
     /// The defaults of a computer.
     fn desktop() -> Self {
-        Self { msaa: 4, anisotropy: 8, ssao: true, shadows: true, shadow_size: 2048, shadow_blobs: true, navigator: true, ui_opacity: 0.85, notes: true, ui_scale: 1.0, ui_scale_window: true, navigator_corner: "bottom-left".into(), boarding: "auto".into(), detail_textures: true, exact_fare: true, enhanced: false, graphics: "vanilla_plus".into(), triple: Default::default(), triple_span: true, triple_hud_center: true, vr: false, vr_scale: 0.65, vr_head_smoothing_ms: 0.0, vr_mirror_rate: 16.0, vr_desktop_mirror: true, fullscreen: false, vsync: true, volume: 0.6, drive_keys: "simple".into(), post_aa: "fxaa".into(), render_scale: 0.0, language: "ENG".into(), pax_voices: "all".into(), nav_arrows: false, nav_ai: true, get_up: false, texture_compression: true, texture_memory: 0, auto_clutch: true, momentary_gears: false, auto_shift: false, min_obj_size: 0.013, max_obj_dist: -1.0, max_fps: 0, chat: true, tooltips: true, name_tags: true, show_fps: false, clouds: true, pax_density: 1.0, vol_ai: 1.0, vol_scenery: 1.0, mirror_size: 256, mirror_hud: 0, mirror_refresh: "full".into(), doppler: true, driver: true, maintenance: 0, ai_unsched_factor: 1.0, ai_max_scheduled: 0, ai_max_parked: 0, ai_max_humans: 200, collision_vehicles: true, collision_objects: true, collision_pedestrians: true, head_movement: true, driverview_smooth: true, hands_in_cab: false, alt_view: true, time_speed: 1.0, time_sync: false, metar_sync: false, metar_station: String::new(), machine_translation: false, shadow_casters: "all".into(), ctrl_deadzone: 0.0, ctrl_off: String::new(), steering_linear: false, old_steering: false, red_steer_spd: false, reflections: true, led_glow: 6, led_mips: 1.3, mouse_sens: 1.0, graphics_api: "auto".into(), ff_invert: false, ff_enabled: true, brake_hold: true, mouse_steering: false, mouse_right_off: false, look_sens: 1.0, blinker_cancel: true, wheel_range: 900.0, wheel_lock: 0.0, fov: 0.0, camera_collision: true, steer_look: false, steer_look_angle: 30.0, steer_look_response: 0.25, pedal_throttle: 1.0, pedal_brake: 1.0, seat: [0.0; 3], head_tracking: false, head_tracking_port: 4242, head_tracking_invert: String::new(), discord_status: true, discord_app_id: String::new(), voice_chat: true }
+        Self { msaa: 4, anisotropy: 8, ssao: true, shadows: true, shadow_size: 2048, shadow_blobs: true, navigator: true, ui_opacity: 0.85, notes: true, ui_scale: 1.0, ui_scale_window: true, navigator_corner: "bottom-left".into(), boarding: "auto".into(), detail_textures: true, exact_fare: true, enhanced: false, graphics: "vanilla_plus".into(), triple: Default::default(), triple_span: true, triple_hud_center: true, vr: false, vr_scale: 0.65, vr_head_smoothing_ms: 0.0, vr_mirror_rate: 16.0, vr_desktop_mirror: true, fullscreen: false, vsync: true, volume: 0.6, drive_keys: "simple".into(), post_aa: "fxaa".into(), render_scale: 0.0, language: "ENG".into(), pax_voices: "all".into(), nav_arrows: false, nav_ai: true, get_up: false, texture_compression: true, texture_memory: 0, auto_clutch: true, momentary_gears: false, auto_shift: false, min_obj_size: 0.013, max_obj_dist: -1.0, max_fps: 0, chat: true, tooltips: true, name_tags: true, show_fps: false, clouds: true, pax_density: 1.0, vol_ai: 1.0, vol_scenery: 1.0, mirror_size: 256, mirror_hud: 0, mirror_refresh: "full".into(), doppler: true, driver: true, maintenance: 0, ai_unsched_factor: 1.0, ai_max_scheduled: 0, ai_max_parked: 0, ai_max_humans: 200, collision_vehicles: true, collision_objects: true, collision_pedestrians: true, head_movement: true, driverview_smooth: true, hands_in_cab: false, alt_view: true, time_speed: 1.0, time_sync: false, metar_sync: false, metar_station: String::new(), machine_translation: false, shadow_casters: "all".into(), ctrl_deadzone: 0.0, ctrl_off: String::new(), steering_linear: false, old_steering: false, red_steer_spd: false, reflections: true, led_glow: 6, led_mips: 1.3, mouse_sens: 1.0, graphics_api: "auto".into(), ff_invert: false, ff_enabled: true, brake_hold: true, mouse_steering: false, mouse_right_off: false, mouse_smooth: true, look_sens: 1.0, blinker_cancel: true, wheel_range: 900.0, wheel_lock: 0.0, fov: 0.0, camera_collision: true, steer_look: false, steer_look_angle: 30.0, steer_look_response: 0.25, pedal_throttle: 1.0, pedal_brake: 1.0, seat: [0.0; 3], head_tracking: false, head_tracking_port: 4242, head_tracking_invert: String::new(), discord_status: true, discord_app_id: String::new(), voice_chat: true, info_bar: false }
     }
 }
 
@@ -538,6 +544,7 @@ impl Settings {
                 "brake_hold" => s.brake_hold = b(v),
                 "mouse_steering" => s.mouse_steering = b(v),
                 "mouse_right_off" => s.mouse_right_off = b(v),
+                "mouse_smooth" => s.mouse_smooth = b(v),
                 "blinker_cancel" => s.blinker_cancel = b(v),
                 "look_sens" => s.look_sens = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.1, 2.0)).unwrap_or(s.look_sens),
                 "wheel_range" => s.wheel_range = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(90.0, 2880.0)).unwrap_or(s.wheel_range),
@@ -562,6 +569,7 @@ impl Settings {
                 "mouse_sens" => s.mouse_sens = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.1, 3.0)).unwrap_or(s.mouse_sens),
                 "ui_scale_window" => s.ui_scale_window = b(v),
                 "notes" => s.notes = b(v),
+                "info_bar" => s.info_bar = b(v),
                 "ui_scale" => s.ui_scale = v.parse::<f32>().ok().filter(|x| x.is_finite()).map(|x| x.clamp(0.5, 2.0)).unwrap_or(s.ui_scale),
                 "shadow_casters" => s.shadow_casters = if v.eq_ignore_ascii_case("omsi") { "omsi".into() } else { "all".into() },
                 "post_aa" => s.post_aa = if matches!(v.to_ascii_lowercase().as_str(), "off" | "0" | "none" | "false") { "off".into() } else { "fxaa".into() },
@@ -676,6 +684,14 @@ pub fn view_distance() -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    /// The information bar is as the last session left it (#1164); off at first.
+    #[test]
+    fn the_information_bar_is_kept_between_sessions() {
+        assert!(!super::Settings::default().info_bar);
+        assert!(super::Settings::from_text("info_bar=1\n").info_bar);
+        assert!(!super::Settings::from_text("info_bar=0\n").info_bar);
+    }
+
     #[test]
     fn triple_hud_defaults_to_the_centre_panel_and_can_span() {
         let mut s = super::Settings::from_text("triple_screen=1\n");

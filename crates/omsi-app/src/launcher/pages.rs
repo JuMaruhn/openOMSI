@@ -49,6 +49,8 @@ pub struct PadsView {
     /// The button last pressed on the shown device and when: its line is lit, so that one
     /// sees which it is and what it does, and can give it an action there.
     pub last_pressed: Option<(usize, std::time::Instant)>,
+    /// "Remove this device" clicked once, and when: a second click removes it.
+    confirm_remove: Option<std::time::Instant>,
 }
 
 /// The set-up assistant of a device: the player lets go of everything, then turns the wheel
@@ -74,6 +76,13 @@ impl PadsView {
                 test.fail("The test was interrupted. Please try again.");
             }
         }
+    }
+
+    /// Give every controller handle up before handing the hardware to the game. The normal
+    /// controller list uses non-exclusive DirectInput too, not only the force-feedback test.
+    pub(super) fn release_io(&mut self) {
+        self.cancel_feedback_test();
+        self.io = None;
     }
 }
 
@@ -619,6 +628,7 @@ fn driving_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
         s["mouse_sens"] = json!((ms * 100.0).round() / 100.0);
         *dirty = 0.3;
     }
+    toggle_setting(ui, s, dirty, c.row(), "Smooth mouse steering (off: the wheel follows the cursor at once, as in OMSI)", "mouse_smooth");
     toggle_setting(ui, s, dirty, c.row(), "A right click ends the mouse steering (as in OMSI)", "mouse_right_off");
     toggle_setting(ui, s, dirty, c.row(), "Indicators cancel themselves (as the bus's script does)", "blinker_cancel");
     toggle_setting(ui, s, dirty, c.row(), "The keyboard brake stays on until the throttle (as in OMSI)", "brake_hold");
@@ -871,7 +881,47 @@ fn sound_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, cols: [Rect; 2]) -> [f
     }
     toggle_setting(ui, s, dirty, c.row(), "Doppler effect", "doppler");
     sel_setting(ui, s, dirty, "s-voices", c.row(), "Passenger voices", "pax_voices", &[("all", "Greetings and tickets"), ("tickets", "Only the ticket asked for"), ("off", "Silent")]);
-    [c.used(), 0.0]
+    [c.used(), radio_stations(ui, cols[1])]
+}
+
+thread_local! {
+    /// The radio stations as the Sound settings edit them (`radio.cfg`, read the first time).
+    static RADIO: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The bus radios' internet stations (`radio.cfg`, see `radio`): each with its name and
+/// address, removed or added here, saved at once (#857). Returns the column's height.
+fn radio_stations(ui: &mut Ui, r: Rect) -> f32 {
+    let mut c = Col::new(ui, r, "Radio stations");
+    c.y += ui.paragraph("A radio's station button n plays the n-th station, a cassette player the first; Shift+R steps through them. An address is an MP3, AAC or Ogg stream or an .m3u/.pls playlist.", Vec2::new(c.inner.x, c.y), c.inner.w, 12.5, Weight::Regular, TEXT_DIM) + 8.0;
+    RADIO.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let list = cell.get_or_insert_with(crate::radio::own_stations);
+        let mut changed = false;
+        let mut remove = None;
+        for (k, (name, address)) in list.iter_mut().enumerate() {
+            let row = c.row();
+            let nw = (row.w * 0.3).round();
+            changed |= ui.text_input(&format!("radio-name-{k}"), Rect::new(row.x, row.y, nw, row.h), name, "Name", None);
+            changed |= ui.text_input(&format!("radio-url-{k}"), Rect::new(row.x + nw + 8.0, row.y, row.w - nw - 8.0 - 36.0, row.h), address, "https://…", None);
+            if ui.icon_button(&format!("radio-del-{k}"), Vec2::new(row.right() - 16.0, row.center().y), 14.0, "delete", "Remove this station") {
+                remove = Some(k);
+            }
+        }
+        if let Some(k) = remove {
+            list.remove(k);
+            changed = true;
+        }
+        if ui.button("radio-add", c.row(), "Add a station", Some("add"), ButtonKind::Normal) {
+            list.push((String::new(), String::new()));
+        }
+        if changed {
+            if let Err(e) = crate::radio::save_stations(list) {
+                log::warn!("radio.cfg: {e}");
+            }
+        }
+    });
+    c.used()
 }
 
 /// How the world behaves: passengers, traffic, collisions, wear, the clock.
@@ -1011,6 +1061,7 @@ fn general_tab(ui: &mut Ui, s: &mut Value, dirty: &mut f32, out: &mut Outside, c
             out.check_updates = true;
         }
         let text = match &out.update {
+            Status::UpToDate if crate::updater::is_test_build(crate::updater::current_version()) => format!("{} is a test build: it is not updated", crate::updater::current_version()),
             Status::UpToDate => format!("{} is the latest version", crate::updater::current_version()),
             Status::Available(rel) => format!("{} is available", rel.version),
             Status::Failed(_) => "The last check failed".to_string(),
@@ -1039,6 +1090,12 @@ fn mb(v: i64) -> String {
 }
 
 // --- controls ---------------------------------------------------------------------------------
+
+/// The game's own actions a controller's button can be given, besides the bus's: the doors
+/// and gears of any bus, looking round while held, the cameras and the views - both of
+/// OMSI's view resets, the one view's (C) and every view's (Space), which a controller
+/// could not bring back to the first camera (#1167).
+const PAD_GAME_ACTIONS: [&str; 25] = ["doors_all", "door_4", "door_3", "door_2", "door_1", "gear_up", "gear_down", "view_look_left", "view_look_right", "view_look_up", "view_look_down", "view_reset_direction", "view_reset_all_directions", "view_interiorcam_plus", "view_interiorcam_minus", "view_toggle_viewpoint", "view_toggle_interior", "view_set_driver", "view_set_passenger", "view_set_outside", "sim_pause", "screenshot", "quicksave", "toggel_mouse_ctrl", "toggel_ctrler"];
 
 fn action_text(names: &crate::describe::ControlNames, a: &str) -> String {
     known_action(a).unwrap_or_else(|| names.control(a))
@@ -1370,6 +1427,7 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         pv.capturing = false;
         pv.revealed_button = None;
         pv.wizard = None;
+        pv.confirm_remove = None;
     }
     if let Some(name) = add {
         devices.push(DeviceCfg { name, second: "0".into(), ..Default::default() });
@@ -1457,7 +1515,7 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
         }
     }
     // the game's own view actions (looking around while held, the cameras, the views)
-    for a in ["doors_all", "door_4", "door_3", "door_2", "door_1", "gear_up", "gear_down", "view_look_left", "view_look_right", "view_look_up", "view_look_down", "view_reset_direction", "view_interiorcam_plus", "view_interiorcam_minus", "view_toggle_viewpoint", "view_toggle_interior", "view_set_driver", "view_set_passenger", "view_set_outside", "sim_pause", "screenshot", "quicksave", "toggel_mouse_ctrl", "toggel_ctrler"] {
+    for a in PAD_GAME_ACTIONS {
         if !actions.iter().any(|x| x == a) {
             actions.insert(1, a.to_string());
         }
@@ -1611,6 +1669,33 @@ fn game_controllers(l: &mut Launcher, body: Rect) {
     if l.ui.button("pad-add-button", add_r, if pv.capturing { "Press a button on the device…" } else { "Add a button" }, Some("add"), ButtonKind::Normal) {
         pv.capturing = !pv.capturing;
     }
+    // a device no longer used (a wheel sold, one that came along in OMSI's own file) leaves
+    // the list on a second click; Save keeps it so, and a connected one can be set up again
+    // from the list (#636)
+    let armed = pv.confirm_remove.is_some_and(|t| t.elapsed().as_secs() < 4);
+    let remove_r = Rect::new(inner.right() - 260.0, inner.bottom() - 40.0, 260.0, 36.0);
+    if l.ui.button("pad-remove", remove_r, if armed { "Click again to remove" } else { "Remove this device" }, Some("delete"), ButtonKind::Danger) {
+        if armed {
+            release_feedback(&mut pv.io, &mut pv.feedback_test);
+            let name = remove_device(devices, &mut pv.selected);
+            pv.capturing = false;
+            pv.revealed_button = None;
+            pv.last_pressed = None;
+            pv.confirm_remove = None;
+            pv.dirty = true;
+            l.state.set_status(format!("{name} removed: press Save to keep it so."), false);
+        } else {
+            pv.confirm_remove = Some(std::time::Instant::now());
+        }
+    }
+}
+
+/// Take the device shown (`selected`) out of the list; the one below it (or the last) is
+/// shown next. Its name.
+fn remove_device(devices: &mut Vec<crate::controllers::DeviceCfg>, selected: &mut usize) -> String {
+    let name = devices.remove(*selected).name;
+    *selected = (*selected).min(devices.len().saturating_sub(1));
+    name
 }
 
 /// The steps of the set-up assistant (see `Wizard`): what the player is asked each time.
@@ -2449,7 +2534,7 @@ mod settings_tests {
             graphics.push("s-api");
         }
         let driving = vec![
-            "s-keys", "set-steering_linear", "set-old_steering", "set-red_steer_spd", "s-mouse", "set-mouse_right_off", "set-blinker_cancel", "set-brake_hold", "set-auto_clutch", "set-momentary_gears", "s-go-keys",
+            "s-keys", "set-steering_linear", "set-old_steering", "set-red_steer_spd", "s-mouse", "set-mouse_smooth", "set-mouse_right_off", "set-blinker_cancel", "set-brake_hold", "set-auto_clutch", "set-momentary_gears", "s-go-keys",
             "s-wrange", "s-wlock", "s-pedt", "s-pedb", "set-ff_enabled", "set-ff_invert", "s-wreset", "s-go-pads",
         ];
         let mut camera = vec![
@@ -2482,7 +2567,8 @@ mod settings_tests {
         if cfg!(windows) {
             camera.extend(["set-vr", "s-vr-scale", "s-vr-head-smoothing", "s-vr-mirror-rate", "set-vr_desktop_mirror", "s-go-vr-keys"]);
         }
-        let sound = vec!["s-vol", "s-volai", "s-volsc", "set-doppler", "s-voices"];
+        // (the radio stations: one, see `frame`)
+        let sound = vec!["s-vol", "s-volai", "s-volsc", "set-doppler", "s-voices", "radio-name-0", "radio-url-0", "radio-del-0", "radio-add"];
         let gameplay = vec![
             "s-board", "set-exact_fare", "s-pax", "set-get_up", "s-unsched", "s-maxsched", "s-maxpark",
             "s-maint", "set-collision_vehicles", "set-collision_objects", "set-collision_pedestrians", "set-use_real_time", "set-use_real_date", "set-time_sync", "set-metar_sync", "s-timespeed",
@@ -2508,8 +2594,12 @@ mod settings_tests {
         Outside { update: Status::Idle, check_updates: false, reset: false, controls: None }
     }
 
-    /// One frame of tab `tab`, its two columns tall enough that nothing is cut off.
+    /// One frame of tab `tab`, its two columns tall enough that nothing is cut off. The Sound
+    /// tab lists one radio station (not the radio.cfg of whoever runs the tests).
     fn frame(ui: &mut Ui, tab: usize, s: &mut Value, out: &mut Outside) {
+        RADIO.with(|r| {
+            r.borrow_mut().get_or_insert_with(|| vec![("One".into(), "https://example.org/one.mp3".into())]);
+        });
         ui.begin(Vec2::new(1200.0, 2000.0), 1.0, 1.0 / 60.0);
         let mut dirty = 0.0;
         settings_tab(ui, tab, s, &mut dirty, out, [Rect::new(0.0, 0.0, 580.0, 2000.0), Rect::new(620.0, 0.0, 580.0, 2000.0)]);
@@ -2557,6 +2647,20 @@ mod settings_tests {
         assert_eq!(click(1, "s-go-pads", &mut s).controls, Some(1));
     }
 
+    /// The mouse steering's smoothing is on unless switched off, and the switch is kept (#1092).
+    #[test]
+    fn smooth_mouse_steering_switches_off_and_is_saved() {
+        let mut s = all_rows();
+        assert_eq!(s["mouse_smooth"], json!(true));
+        click(1, "set-mouse_smooth", &mut s);
+        assert_eq!(s["mouse_smooth"], json!(false));
+        let saved = core::settings_to_text(&s, None);
+        assert!(saved.contains("mouse_smooth=0\n"), "{saved}");
+        assert_eq!(core::settings_from_text(Some(&saved))["mouse_smooth"], json!(false));
+        assert!(!crate::settings::Settings::from_text(&saved).mouse_smooth);
+        assert!(crate::settings::Settings::from_text("").mouse_smooth);
+    }
+
     #[test]
     fn reset_asks_first_and_changes_nothing() {
         let mut s = all_rows();
@@ -2564,5 +2668,43 @@ mod settings_tests {
         let out = click(5, "s-reset", &mut s);
         assert!(out.reset);
         assert_eq!(s, before);
+    }
+}
+
+#[cfg(test)]
+mod pad_action_tests {
+    /// Every game action a button can be given is one the game carries out from a
+    /// controller (app_events: `view_look_*` and the gears by name, the rest through
+    /// `is_game_action`, the doors through `Player::action`) - Space's reset of every view
+    /// among them (#1167).
+    #[test]
+    fn a_button_can_reset_every_view() {
+        assert!(super::PAD_GAME_ACTIONS.contains(&"view_reset_all_directions"));
+        for a in super::PAD_GAME_ACTIONS {
+            let handled = crate::input_script::is_game_action(a) || a.starts_with("gear_") || crate::player::door_action(a).is_some();
+            assert!(handled, "{a}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod pad_remove_tests {
+    use crate::controllers::{cfg_text, parse_cfg};
+
+    /// A device taken out of the list is gone from the file Save writes, and the next one is
+    /// shown - the one below it, or above it when it was the last (#636).
+    #[test]
+    fn a_removed_device_leaves_the_file() {
+        let mut devices = parse_cfg("[ctrl]\r\nSideWinder Joystick\r\n0\r\n\r\n[ctrl]\r\nLogitech G25 Racing Wheel USB\r\n1\r\n\r\n[ctrl]\r\nMOZA R3 Base\r\n0\r\n");
+        let mut sel = 1;
+        assert_eq!(super::remove_device(&mut devices, &mut sel), "Logitech G25 Racing Wheel USB");
+        assert_eq!(sel, 1);
+        let names = |text: &str| parse_cfg(text).into_iter().map(|d| d.name).collect::<Vec<_>>();
+        assert_eq!(names(&cfg_text(&devices)), ["SideWinder Joystick", "MOZA R3 Base"]);
+        assert_eq!(super::remove_device(&mut devices, &mut sel), "MOZA R3 Base");
+        assert_eq!(sel, 0);
+        assert_eq!(super::remove_device(&mut devices, &mut sel), "SideWinder Joystick");
+        assert_eq!(sel, 0);
+        assert!(names(&cfg_text(&devices)).is_empty());
     }
 }

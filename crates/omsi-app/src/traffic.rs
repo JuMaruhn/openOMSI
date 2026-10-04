@@ -6793,18 +6793,12 @@ impl Traffic {
     }
 
     /// Tell a scheduled bus's script who wants in or out (`PAX_Entry<i>_Req`,
-    /// `PAX_Exit<i>_Req`): the stock AI door scripts open the rear doors only for a stop
-    /// request, which comes from the exit requests.
-    pub fn set_pax_requests(&mut self, id: u64, entry: &[bool], exit: &[bool]) {
+    /// `PAX_Exit<i>_Req`) and who stands in its doorways (`_Busy`): the stock AI door
+    /// scripts open the rear doors only for a stop request, which comes from the exit
+    /// requests.
+    pub fn set_pax_requests(&mut self, id: u64, doors: &crate::humans::DoorWants) {
         if let Some(c) = self.cars.iter_mut().find(|c| c.id == id) {
-            for (i, r) in entry.iter().enumerate() {
-                c.vehicle
-                    .set_var(&format!("PAX_Entry{i}_Req"), *r as i32 as f32);
-            }
-            for (i, r) in exit.iter().enumerate() {
-                c.vehicle
-                    .set_var(&format!("PAX_Exit{i}_Req"), *r as i32 as f32);
-            }
+            crate::humans::Humans::write_door_requests(&mut c.vehicle, doors);
         }
     }
 

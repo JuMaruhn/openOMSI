@@ -32,6 +32,8 @@ pub(crate) fn run_offscreen(
     crate::lights::set_corona_root(&args.root);
     let mut scene = renderer.new_scene();
     let (world, mut camera) = lan::answering_while(&mut lan_off, args.bus.as_deref(), || load_world(args, &renderer, &mut scene))?;
+    // the map's own route arrows, with OMSI 2's route arrows
+    world.show_help_arrows(&renderer, &mut scene, settings.nav_arrows);
     let lan_seed = lan_off.as_ref().map(lan::population_seed);
     // (a player who joins another's game draws the host's traffic in it, whatever their own
     // count says: without it the host's cars had nowhere to go - "passengers, but no
@@ -153,6 +155,7 @@ pub(crate) fn run_offscreen(
         p.vehicle.host.schedule_active = active;
         p.vehicle.set_var("schedule_active", active);
     }
+    let mut journey = None;
     let mut career = args
         .driver
         .as_deref()
@@ -374,6 +377,11 @@ pub(crate) fn run_offscreen(
     if let Some(t) = traffic.as_ref() {
         crate::ground_gap::check_lanes(&world, t);
     }
+    // the tyres' spray (see `puddles`): the roads as wet as the picture draws them, the air
+    // moving with the weather's wind ([wind] direction (deg) speed (m/s))
+    let mut spray = puddles::Spray::new();
+    let spray_wet = puddles::road_wetness(initial_wetness(&weather), weather.snow);
+    let spray_wind = Vec3::new(weather.wind.0.to_radians().sin(), weather.wind.0.to_radians().cos(), 0.0) * weather.wind.1 * puddles::GROUND_WIND;
     for i in 0..total_frames {
         let t_s = i as f32 * dt;
         if server {
@@ -612,11 +620,12 @@ pub(crate) fn run_offscreen(
                         player.ibis_to_stop(trip, k);
                     }
                 }
-                if let Some((arrival, departure)) =
-                    d.update(&mut player.vehicle, parse_time(&args.time) + t_s as f64)
-                {
+                let due = (d.trip_index, d.next_stop);
+                let served = d.update(&mut player.vehicle, parse_time(&args.time) + t_s as f64);
+                if let Some((arrival, departure)) = served {
                     career.stop_served(arrival, departure);
                 }
+                crate::journey::note(&mut journey, d, due, served, &args.root, || crate::journey::head(&career, &world.global.name, &player.vehicle, &player.vehicle.host.clock));
                 if d.take_trip_change() && player.duty_typed {
                     let (trip, stop) = d.trip_for_ibis();
                     player.set_duty_destination(trip, stop);
@@ -960,6 +969,7 @@ pub(crate) fn run_offscreen(
             };
             h.eye = Some(humans::Eye::of(&eye_cam, view_aspect).widened(triple_extent(&settings, &eye_cam, size.0, size.1)));
             h.set_remote_buses(remotes_off.remotes.iter().map(|(id, r)| (*id, r.vehicle())));
+            h.set_duty(duty.as_ref());
             let took = h.tick(
                 dt,
                 &world,
@@ -989,8 +999,8 @@ pub(crate) fn run_offscreen(
                 for (id, stop, secs) in h.take_holds() {
                     t.hold_boarding(id, stop, secs);
                 }
-                for (id, entry, exit) in h.take_ai_requests() {
-                    t.set_pax_requests(id, &entry, &exit);
+                for (id, doors) in h.take_ai_requests() {
+                    t.set_pax_requests(id, &doors);
                 }
             }
             if let Some(p) = player.as_mut() {
@@ -1083,6 +1093,25 @@ pub(crate) fn run_offscreen(
             // the other games run in real time
             std::thread::sleep(std::time::Duration::from_secs_f32(dt));
         }
+        // the tyres' spray, frame by frame as the window throws it (the camera that matters
+        // for its detail: the followed car's, else the player's bus)
+        if spray_wet > 0.0 && omsi_cfg::env::var_os("OMSI_NO_SPRAY").is_none() {
+            let eye = traffic
+                .as_ref()
+                .and_then(|t| follow_id(args, Some(t)).and_then(|id| follow_camera(Some(t), id)))
+                .map(|c| c.position)
+                .or(player.as_ref().filter(|_| args.cam.is_none()).map(|p| p.vehicle.position))
+                .unwrap_or(camera.position);
+            let mut vehicles: Vec<(u64, &omsi_sim::VehicleInstance)> = Vec::new();
+            if let Some(p) = player.as_ref() {
+                vehicles.push((0, &p.vehicle));
+            }
+            if let Some(t) = traffic.as_ref() {
+                vehicles.extend(t.cars.iter().map(|c| (c.id.wrapping_add(1), &c.vehicle)));
+            }
+            vehicles.extend(remotes_off.remotes.iter().map(|(id, r)| (puddles::REMOTE_KEY | *id as u64, r.vehicle())));
+            spray.frame(dt, &vehicles, eye, spray_wind, &|x, y| puddles::water_at(x, y, world.wet_road_at(x, y, spray_wet)));
+        }
         // mid-run snapshots (relative to the first overtake with --follow auto)
         let auto_base = match args.follow.as_deref() {
             Some("auto") => traffic.as_ref().and_then(|t| t.last_overtaker).map(|o| o.1),
@@ -1156,6 +1185,7 @@ pub(crate) fn run_offscreen(
                     world.update_light_map_atlas(&renderer, cam.position);
                     lights::collect(&world, &mut scene, &daylight, cam.position, &vehicles);
                 }
+                spray.sprites(cam.position, &mut scene.smoke);
                 let rate = precip_of(&weather).1;
                 let mut lighting = weather_lighting(
                     &daylight,
@@ -2493,29 +2523,15 @@ pub(crate) fn run_offscreen(
                 &player_ref.as_ref().or(player.as_ref()).map(|p| rain::vehicle_boxes(&p.vehicle)).unwrap_or_default(),
             );
         }
-        // a moving player's wheels through the puddles the enhanced renderer paints on wet
-        // roads (OMSI_DRIVE_V0=S moves it without needing a full engine-start sequence)
-        if kind == 1 {
-            if let Some(p) = player_ref.as_ref() {
-                let wheels = puddles::wheel_contacts(&p.vehicle);
-                let speed = p.vehicle.physics.velocity_kmh().abs() / 3.6;
-                let mut sp = puddles::Splashes::new();
-                for _ in 0..30 {
-                    scene
-                        .smoke
-                        .extend(sp.update(1.0 / 30.0, &wheels, speed, &|x, y| {
-                            puddles::puddle_coverage(x, y, world.wet_road_at(x, y, wetness))
-                        }));
-                }
-                log::info!(
-                    "splashes: {} wheels, {:.1} km/h, {} in a puddle, {} coronas",
-                    wheels.len(),
-                    speed * 3.6,
-                    sp.wheels_in_puddle,
-                    scene.coronas.len()
-                );
-            }
-        }
+        // the tyres' spray as the drive left it (OMSI_DRIVE_V0=S moves the bus without a
+        // full engine-start sequence)
+        spray.sprites(camera.position, &mut scene.smoke);
+        log::info!(
+            "spray: {} puffs; at the end {} tyres threw water, {} of them in a puddle",
+            spray.len(),
+            spray.tyres_wet,
+            spray.tyres_in_puddle
+        );
         log::info!(
             "daylight: sun altitude {:.1}°, night {:.2}, lamps {}, {} lights, {} coronas",
             daylight.altitude_deg,
@@ -2607,6 +2623,7 @@ pub(crate) fn run_offscreen(
             let (outside_temp, inside_temp) = crate::app_events::vehicle_temperatures(p);
             let frame = navigator::NavFrame {
                 traffic: traffic.as_ref(),
+                players: lan_off.as_ref().map(|l| lan::nav_players(&remotes_off, l.my_id)).unwrap_or_default(),
                 bus: p.vehicle.position,
                 heading: p.vehicle.heading,
                 speed_kmh: p.vehicle.physics.velocity_kmh(),
@@ -2625,6 +2642,7 @@ pub(crate) fn run_offscreen(
                 ui_scale: settings.ui_scale,
                 follow_window: settings.ui_scale_window,
                 dt: 0.1,
+                info_rect: None,
             };
             for _ in 0..30 {
                 nav.frame_at(&renderer, &mut scene, &frame, viewport[0]);

@@ -102,7 +102,8 @@ fn numeric_ibis_line(line: &str) -> bool {
 }
 
 /// The route number on the bus's IBIS and display, as picked or typed in the destination
-/// list (the destination stays: the one on the display now, else the first).
+/// list (the destination stays: the one on the display now, else the first -
+/// `schedule::shown_destination`).
 pub(crate) fn set_route_by_hand(app: &mut App, line: &str) {
     let line = line.trim();
     if line.is_empty() {
@@ -111,11 +112,11 @@ pub(crate) fn set_route_by_hand(app: &mut App, line: &str) {
     if let Some(p) = app.player.as_mut() {
         if numeric_ibis_line(line) {
             let hof = p.vehicle.host.hof.clone();
-            let code = p.vehicle.var("IBIS_TerminusCode").unwrap_or(-1.0) as i32;
-            let named = |t: &&omsi_vehicle::hof::Terminus| t.strings.first().is_some_and(|s| !s.trim().is_empty());
-            let term = hof.as_ref().and_then(|h| h.termini.iter().filter(named).find(|t| t.code == code).or_else(|| h.termini.iter().find(named)));
-            let name = term.and_then(|t| t.strings.first().cloned()).unwrap_or_default();
-            crate::schedule::set_player_destination_directly(&mut p.vehicle, hof.as_deref(), line, &name, &[]);
+            if let Some(hof) = hof.as_deref() {
+                if let Some(ti) = crate::schedule::shown_destination(&p.vehicle, hof, p.blind_pick.as_ref()) {
+                    p.set_destination_by_hand(hof, line, ti);
+                }
+            }
         } else {
             // OMSI's route-number field is also used as arbitrary display text. Do not
             // force symbols/unknown letters through IBIS_LinieKurs: that would turn "-10"
@@ -133,6 +134,38 @@ pub(crate) fn set_route_by_hand(app: &mut App, line: &str) {
         );
         app.service_msg = Some((format!("Route {line}"), 3.0));
     }
+}
+
+/// The route number the bus shows: its matrix's (`Matrix_Nr`), else the one it was set to
+/// (`SetLineTo`), else its IBIS's line number.
+fn line_shown(v: &omsi_sim::VehicleInstance) -> Option<String> {
+    [v.str_var("Matrix_Nr"), v.str_var("SetLineTo")]
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
+        .or_else(|| ibis_line_number(v))
+}
+
+fn ibis_line_number(v: &omsi_sim::VehicleInstance) -> Option<String> {
+    v.var("IBIS_LinieKurs").filter(|l| *l > 0.0).map(|l| format!("{}", l as i64))
+}
+
+/// The line a destination picked from the list is set with: the route number the bus
+/// shows, when the IBIS can take it - its matrix's (`Matrix_Nr`), a roller blind's
+/// (`SetLineTo`, which its crank sets) - else the IBIS's own number. Taken from
+/// `IBIS_LinieKurs`, the IBIS's number without its letter, a pick made 92E into 92 on the
+/// IBIS and the matrix. Not `SetLineTo` on any other bus: no script of its own writes it,
+/// only an earlier pick, so a line typed on the IBIS since went back to that pick's.
+fn destination_line(v: &omsi_sim::VehicleInstance) -> String {
+    let blind = crate::schedule::has_roller_blind(v).then(|| v.str_var("SetLineTo"));
+    [Some(v.str_var("Matrix_Nr")), blind]
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim().to_string())
+        .find(|s| !s.is_empty())
+        .filter(|l| numeric_ibis_line(l))
+        .or_else(|| ibis_line_number(v))
+        .unwrap_or_default()
 }
 
 /// Names in older packs often use underscores as spaces.
@@ -171,10 +204,13 @@ fn bus_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     }
 }
 
-/// The vehicles of the place list as (manufacturer's key, manufacturer, type, path).
+/// The vehicles of the place list as (manufacturer's key, manufacturer, type, path): on a
+/// server only those it offers (#1183).
 fn place_vehicles(app: &App, unknown: &str) -> Vec<(String, String, String, String)> {
+    let offered = crate::lan::server_offers();
     app.vehicle_list
         .iter()
+        .filter(|(_, path)| offered.as_deref().is_none_or(|o| crate::lan::offers(o, path)))
         .map(|(name, path)| {
             let (maker, ty) = app.vehicle_meta.get(path).cloned().unwrap_or_default();
             let maker = bus_label(&maker);
@@ -264,27 +300,20 @@ pub(crate) fn items(app: &App, kind: &ListKind) -> Vec<(String, String)> {
         }
         ListKind::Destinations => {
             if let Some(p) = app.player.as_ref().filter(|p| p.vehicle.host.hof.is_some()) {
-                let shown = p.vehicle.str_var("Matrix_Nr").trim().to_string();
-                let set = p.vehicle.str_var("SetLineTo").trim().to_string();
-                let now = if !shown.is_empty() {
-                    shown
-                } else if !set.is_empty() {
-                    set
-                } else {
-                    p.vehicle.var("IBIS_LinieKurs").filter(|l| *l > 0.0).map(|l| format!("{}", l as i64)).unwrap_or_else(|| "-".into())
-                };
+                let now = line_shown(&p.vehicle).unwrap_or_else(|| "-".into());
                 out.push((format!("{}: {now}...", tr("Route number")), "routes".into()));
             }
             if let Some(hof) = app.player.as_ref().and_then(|p| p.vehicle.host.hof.clone()) {
-                let mut termini: Vec<(String, String)> = hof
+                let mut termini: Vec<(String, i32, usize)> = hof
                     .termini
                     .iter()
-                    .map(|t| (t.strings.iter().find(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| t.code.to_string()), t.code.to_string()))
+                    .enumerate()
+                    .map(|(i, t)| (t.strings.iter().find(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| t.code.to_string()), t.code, i))
                     .collect();
-                // (alphabetical, by name)
-                termini.sort_by_key(|(name, _)| name.trim().to_lowercase());
-                for (name, code) in termini {
-                    out.push((format!("{:>3}  {}", code, name.trim()), format!("dest {code}")));
+                // (alphabetical, by name; picked by its row: several may share a name or a code)
+                termini.sort_by_key(|(name, ..)| name.trim().to_lowercase());
+                for (name, code, i) in termini {
+                    out.push((format!("{:>3}  {}", code, name.trim()), format!("dest {i}")));
                 }
             }
             if out.is_empty() {
@@ -703,13 +732,13 @@ pub(crate) fn run_move(app: &mut App, kind: &ListKind, action: &str, mv: Move) -
         ListKind::Destinations => {
             if let Some(p) = app.player.as_mut() {
                 let hof = p.vehicle.host.hof.clone();
-                let code: i32 = arg.trim().parse().unwrap_or(-1);
-                if let Some(t) = hof.as_ref().and_then(|h| h.termini.iter().find(|t| t.code == code)) {
+                let ti: usize = arg.trim().parse().unwrap_or(usize::MAX);
+                if let Some((hof, t)) = hof.as_ref().and_then(|h| h.termini.get(ti).map(|t| (h, t))) {
                     // (the line on the IBIS stays; only the destination changes)
-                    let line = p.vehicle.var("IBIS_LinieKurs").filter(|l| *l > 0.0).map(|l| format!("{}", l as i64)).unwrap_or_default();
-                    let name = t.strings.first().cloned().unwrap_or_default();
-                    crate::schedule::set_player_destination_directly(&mut p.vehicle, hof.as_deref(), &line, &name, &[]);
-                    log::info!("destination display set by hand: {code} {} (terminus code now {:?})", name.trim(), p.vehicle.var("IBIS_TerminusCode"));
+                    let line = destination_line(&p.vehicle);
+                    let name = t.strings.iter().find(|s| !s.trim().is_empty()).cloned().unwrap_or_default();
+                    p.set_destination_by_hand(hof, &line, ti);
+                    log::info!("destination display set by hand: {} {} (terminus code now {:?})", t.code, name.trim(), p.vehicle.var("IBIS_TerminusCode"));
                     app.service_msg = Some((format!("Destination: {}", name.trim()), 3.0));
                 }
             }
@@ -1167,6 +1196,7 @@ fn toggle_now(app: &App, id: &str) -> Option<bool> {
         "coll_vehicles" => s.collision_vehicles,
         "mouse" => app.mouse_drive,
         "mouse_right" => s.mouse_right_off,
+        "mouse_smooth" => s.mouse_smooth,
         "blinker_cancel" => s.blinker_cancel,
         "fps" => s.show_fps,
         "get_up" => s.get_up,
@@ -1281,6 +1311,10 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
             app.settings.mouse_right_off = on;
             Some(("mouse_right_off", bit))
         }
+        "mouse_smooth" => {
+            app.settings.mouse_smooth = on;
+            Some(("mouse_smooth", bit))
+        }
         "get_up" => {
             app.settings.get_up = on;
             Some(("get_up", bit))
@@ -1350,7 +1384,7 @@ fn toggle_set(app: &mut App, id: &str, on: bool) -> Option<(&'static str, String
             None
         }
         "info_bar" => {
-            app.info_bar = on;
+            app.set_info_bar(on);
             None
         }
         "nav_arrows" => {
@@ -1757,7 +1791,7 @@ fn select_options(key: &str) -> Vec<(&'static str, &'static str)> {
         "graphics" => vec![("vanilla", "Vanilla (as OMSI 2)"), ("vanilla_plus", "Vanilla+"), ("enhanced", "Enhanced")],
         "msaa" => vec![("1", "Off"), ("2", "2x MSAA"), ("4", "4x MSAA"), ("8", "8x MSAA")],
         "render_scale" => vec![("auto", "Auto"), ("1", "100%"), ("0.85", "85%"), ("0.75", "75%"), ("0.67", "67%"), ("0.5", "50%")],
-        "anisotropy" => vec![("1", "Off"), ("2", "2x"), ("4", "4x"), ("8", "8x")],
+        "anisotropy" => vec![("1", "Off"), ("2", "2x"), ("4", "4x"), ("8", "8x"), ("16", "16x")],
         "shadow_size" => vec![("1024", "1024"), ("2048", "2048"), ("4096", "4096")],
         "shadow_casters" => vec![("all", "Every solid mesh"), ("omsi", "[shadow] meshes, as OMSI")],
         "max_fps" => vec![("0", "Screen refresh rate"), ("30", "30 fps"), ("45", "45 fps"), ("60", "60 fps"), ("120", "120 fps"), ("144", "144 fps"), ("1000", "Unlimited")],
@@ -2036,6 +2070,7 @@ fn options_pages(app: &App) -> Vec<Page> {
         switch_row(app, "mouse", "Steering with the mouse", "Steer and control the pedals using the mouse"),
         switch_row(app, "mouse_right", "A right click ends the mouse steering", "As in OMSI; off: the right button only looks round"),
         slider_row(app, "mouse_sens", "Mouse steering sensitivity", "Adjust how much the steering wheel turns based on mouse movement", &pct),
+        switch_row(app, "mouse_smooth", "Smooth mouse steering", "The wheel eases after the cursor; off: it follows at once, as in OMSI"),
         switch_row(app, "steering_linear", "Steering linearity (keys at OMSI's steady pace)", "Keyboard steering at OMSI's steady pace"),
         switch_row(app, "old_steering", "Old Steering (the wheel stays, turn it back yourself)", "The wheel stays where the keys left it"),
         switch_row(app, "red_steer_spd", "Dynamic steering (slower keys at speed, OMSI's redSteerSpd)", "The steering keys act slower at speed"),
@@ -2523,6 +2558,43 @@ fn start_duty(app: &mut App, line: &str, tour: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// A destination picked from the list keeps the route number the bus shows, its letter
+    /// too (92E, IBIS 92 and suffix 10).
+    #[test]
+    fn a_destination_picked_from_the_list_keeps_the_lines_letter() {
+        let mut v = crate::schedule::tests::script_test_vehicle("{frame}\n{end}\n", "IBIS_LinieKurs\nIBIS_Linie_Suffix\nIBIS_Linie_Complex\nIBIS_TerminusCode\n", "Matrix_Nr\nSetLineTo\n");
+        let set_str = |v: &mut omsi_sim::VehicleInstance, name: &str, s: &str| {
+            let i = v.ty.program.str_var(name).unwrap();
+            v.state.str_vars[i as usize] = s.to_string();
+        };
+        v.set_var("IBIS_LinieKurs", 92.0);
+        v.set_var("IBIS_Linie_Suffix", 10.0);
+        v.set_var("IBIS_Linie_Complex", 9210.0);
+        set_str(&mut v, "Matrix_Nr", "92E");
+        assert_eq!(super::destination_line(&v), "92E");
+        let hof = omsi_vehicle::Hof { termini: vec![omsi_vehicle::hof::Terminus { code: 211, texture_id: "U Rathaus Spandau".into(), strings: vec!["RATHAUS SPANDAU".into()], ..Default::default() }], ..Default::default() };
+        let line = super::destination_line(&v);
+        crate::schedule::set_player_destination_at(&mut v, &hof, &line, 0, &[]);
+        assert_eq!((v.var("IBIS_LinieKurs"), v.var("IBIS_Linie_Suffix"), v.var("IBIS_Linie_Complex"), v.var("IBIS_TerminusCode")), (Some(92.0), Some(10.0), Some(9210.0), Some(211.0)));
+        // a route number the IBIS cannot take is left to the display: the IBIS keeps its own
+        set_str(&mut v, "Matrix_Nr", "-10");
+        assert_eq!(super::destination_line(&v), "92");
+        // nothing shown: the IBIS's number
+        set_str(&mut v, "Matrix_Nr", "   ");
+        set_str(&mut v, "SetLineTo", "");
+        assert_eq!(super::destination_line(&v), "92");
+        // no matrix line, the line of an earlier pick left in SetLineTo and another typed on
+        // the IBIS since: the IBIS's (only a roller blind shows SetLineTo)
+        set_str(&mut v, "Matrix_Nr", "");
+        set_str(&mut v, "SetLineTo", "5");
+        v.set_var("IBIS_LinieKurs", 145.0);
+        assert_eq!(super::destination_line(&v), "145");
+        let mut blind = crate::schedule::tests::script_test_vehicle("{trigger:rollband_sync}\n{end}\n", "IBIS_LinieKurs\n", "SetLineTo\n");
+        set_str(&mut blind, "SetLineTo", "  5");
+        blind.set_var("IBIS_LinieKurs", 145.0);
+        assert_eq!(super::destination_line(&blind), "5");
+    }
+
     #[test]
     fn escape_fov_updates_the_active_projection_and_can_restore_geometry() {
         let mut settings = crate::settings::Settings::default();
@@ -2537,6 +2609,15 @@ mod tests {
         super::set_camera_fov(&mut settings, 0.0);
         assert_eq!(settings.triple.fov_deg, 0.0);
     }
+    /// The game menu offers the 16x anisotropic filtering the launcher does (#669): set
+    /// there, it showed as a bare "16" here and could not be chosen again.
+    #[test]
+    fn sixteen_x_anisotropy_can_be_chosen_in_the_game_menu() {
+        let file = serde_json::json!({ "anisotropy": 16 });
+        let (options, at, _) = super::select_state(&file, "anisotropy");
+        assert_eq!(at.map(|i| options[i]), Some(("16", "16x")));
+    }
+
     #[test]
     fn steps_wrap_round() {
         assert_eq!(super::next_step(&super::SPEEDS, 1.0), 2.0);

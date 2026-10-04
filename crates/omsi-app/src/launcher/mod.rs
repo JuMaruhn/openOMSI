@@ -36,7 +36,7 @@ use ui::{Key, Ui};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -121,7 +121,7 @@ pub struct Launcher {
     pub icons: std::collections::HashMap<String, usize>,
     pub icons_pending: Vec<(String, image::RgbaImage)>,
     last: Instant,
-    modifiers: ModifiersState,
+    modifiers: ui::Modifiers,
     /// Right or left drag over the showroom.
     dragging: Option<Vec2>,
     clipboard: Option<Clipboard>,
@@ -200,7 +200,7 @@ impl Launcher {
         icons: Default::default(),
         icons_pending: Vec::new(),
         last: Instant::now(),
-        modifiers: ModifiersState::empty(),
+        modifiers: ui::Modifiers::default(),
         dragging: None,
         clipboard: Clipboard::new().ok(),
         // OMSI_LAUNCHER_EXIT=secs, OMSI_LAUNCHER_SHOT=secs:file.png, OMSI_LAUNCHER_PAGE=mods:
@@ -313,7 +313,7 @@ impl Launcher {
     /// launcher's window).
     #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     pub fn release_window(&mut self) -> Option<Arc<Window>> {
-        self.pages.pads.cancel_feedback_test();
+        self.pages.pads.release_io();
         self.surface = None;
         self.drop_gpu();
         self.renderer = None;
@@ -450,10 +450,8 @@ impl ApplicationHandler for Launcher {
             }
             WindowEvent::Focused(false) => self.held.clear(),
             WindowEvent::ModifiersChanged(m) => {
-                self.modifiers = m.state();
-                self.ui.input.shift = self.modifiers.shift_key();
-                self.ui.input.ctrl = self.modifiers.control_key() || self.modifiers.super_key();
-                self.ui.input.alt = self.modifiers.alt_key();
+                self.modifiers.told(m.state());
+                self.modifiers.apply(&mut self.ui.input);
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let p = Vec2::new(position.x as f32, position.y as f32) / scale;
@@ -504,6 +502,10 @@ impl ApplicationHandler for Launcher {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
+                    // (Shift, Ctrl, Alt from their keys where the window never says: Android)
+                    if self.modifiers.key(code, event.state == ElementState::Pressed) {
+                        self.modifiers.apply(&mut self.ui.input);
+                    }
                     // (held keys are kept whichever way the event goes, so a key let go
                     // while the window had no focus does not stay down for ever)
                     if event.state == ElementState::Pressed {
@@ -523,7 +525,7 @@ impl ApplicationHandler for Launcher {
                         }
                     }
                 }
-                let cmd = self.modifiers.control_key() || self.modifiers.super_key();
+                let cmd = self.modifiers.command();
                 // a phone's back key: out of the storage browser, else like Escape
                 if event.physical_key == PhysicalKey::Code(KeyCode::BrowserBack) {
                     if self.browser.is_some() {
@@ -718,6 +720,8 @@ impl Launcher {
         self.focused = f;
         if !f {
             self.pages.pads.cancel_feedback_test();
+            self.modifiers.release_keys();
+            self.modifiers.apply(&mut self.ui.input);
         }
         // (only once the game is on its way: the launcher has the focus while Start is
         // pressed, and gives the device up then as before)
@@ -798,7 +802,9 @@ impl Launcher {
             // Finish the Discord handoff in the background before starting the child.
             #[cfg(not(target_os = "android"))]
             drop(self.discord.take());
-            self.pages.pads.cancel_feedback_test();
+            // The Controls page may still own the same DirectInput wheel non-exclusively.
+            // Drop it before the child asks for exclusive foreground access for force feedback.
+            self.pages.pads.release_io();
             self.state.spawn_launch(d);
         }
     }

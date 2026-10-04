@@ -52,8 +52,8 @@ pub(crate) struct App {
     pub(crate) ui: Option<ui::Ui>,
     pub(crate) fps: f32,
     pub(crate) rain: rain::Rain,
-    /// Wheel splashes through the puddles `enhanced.wgsl` paints on wet roads.
-    pub(crate) splashes: puddles::Splashes,
+    /// What the tyres throw up from the water on the roads (see `puddles`).
+    pub(crate) spray: puddles::Spray,
     pub(crate) lamps_on: Option<bool>,
     pub(crate) menu: Option<menu::Menu>,
     pub(crate) populate_t: f32,
@@ -290,6 +290,8 @@ pub(crate) struct App {
     pub(crate) log_state: crate::applog::LogState,
     /// The driver's personnel file and this session's statistics.
     pub(crate) career: career::Career,
+    /// The duty's stops with their times as driven, kept in a file (`journey`).
+    pub(crate) journey: Option<crate::journey::Journey>,
     /// How wet the roads are (0..1), built up by rain and dried by the sun.
     pub(crate) wetness: f32,
     /// How far the cloud cover has drifted with the wind (fractions of its tiling), summed
@@ -1129,6 +1131,7 @@ pub(crate) fn blend_local(a: &omsi_vehicle::Camera, b: &omsi_vehicle::Camera, k:
         yaw,
         pitch,
         extra: b.extra,
+        fixed: b.fixed,
     }
 }
 

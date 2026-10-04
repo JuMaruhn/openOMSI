@@ -372,6 +372,12 @@ impl App {
                         return;
                     }
 
+                    // the duty's next stop given up (#1015), as the game menu's line ("H" for
+                    // Haltestelle: Ctrl+Shift+N is the VR navigator's)
+                    KeyCode::KeyH if ctrl && shift_now && !alt && self.duty.is_some() && !self.chord_bound(code, shift_now, ctrl, alt) => {
+                        self.skip_next_stop();
+                        return;
+                    }
                     // the object editor (`crate::editor`)
                     KeyCode::KeyE if ctrl && shift_now => {
                         self.toggle_editor();
@@ -390,7 +396,7 @@ impl App {
                     // OMSI's `view_toggle_informationdisplay` (Ctrl+Y)
                     // OMSI's `view_toggle_informationdisplay` (Shift+Y: 21 / 2)
                     KeyCode::KeyY if shift_now && !ctrl => {
-                        self.info_bar = !self.info_bar;
+                        self.set_info_bar(!self.info_bar);
                         return;
                     }
                     // OMSI's `view_set_schedule` (Insert: 210 / 1, the key's state every frame)
@@ -851,7 +857,7 @@ impl App {
             self.look.0 = (self.look.0 + dx).rem_euclid(360.0);
             self.look.1 = (self.look.1 - dy).clamp(-60.0, 25.0);
         } else {
-            self.look.0 = cab_look_yaw(&self.view, self.look.0 + dx);
+            self.look.0 = cab_look_yaw(self.look.0 + dx);
             self.look.1 = (self.look.1 - dy).clamp(-85.0, 85.0);
         }
     }
@@ -2357,6 +2363,12 @@ impl App {
         // (in the driven vehicle's place, see `swap_pending`)
         let swap = std::mem::take(&mut self.swap_pending) && self.player.is_some();
         let name = self.vehicle_list.iter().find(|v| v.1 == bus).map(|v| v.0.clone()).unwrap_or_else(|| bus.to_string());
+        // (a server's own buses only - its `vehicles` list, #1183 - whoever asks: the lists,
+        // a plugin, the input script)
+        if crate::lan::server_offers().is_some_and(|o| !crate::lan::offers(&o, bus)) {
+            self.service_msg = Some((format!("The server does not offer {name}"), 4.0));
+            return;
+        }
         let bus = bus.to_string();
         let (Some(w), Some(r), Some(scene), Some(cam)) = (self.world.clone(), self.renderer.as_ref(), self.scene.as_mut(), self.camera.as_ref()) else { return };
         let (x, y, heading) = match (self.view.as_str(), self.player.as_ref()) {
@@ -2797,6 +2809,10 @@ impl App {
                 self.close_game_menu();
                 self.take_screenshot();
             }
+            "skipstop" => {
+                self.close_game_menu();
+                self.skip_next_stop();
+            }
             // the route ends here: free drive, as the list of lines has it
             "endduty" => {
                 self.duty = None;
@@ -2826,6 +2842,23 @@ impl App {
         }
     }
 
+    /// The duty gives up the stop it is due at and goes on with the one after it (the game
+    /// menu's "Skip the next stop", Ctrl+Shift+H): the IBIS moves on with it, as it does
+    /// when a bus page sets the next stop.
+    pub(crate) fn skip_next_stop(&mut self) {
+        let Some(d) = self.duty.as_mut() else { return };
+        let Some(name) = d.skip_next() else {
+            self.service_msg = Some(("The trip is over: no stop to skip".into(), 3.0));
+            return;
+        };
+        log::info!("duty: stop '{name}' skipped, next stop {}", d.next_stop);
+        if let Some(p) = self.player.as_mut() {
+            let (trip, k) = d.trip_for_ibis();
+            p.ibis_to_stop(trip, k);
+        }
+        self.service_msg = Some((format!("Stop skipped: {name}"), 3.0));
+    }
+
     /// The actions of the vehicle and world pages (and of what the plugins and the input
     /// script ask of the menu by name). False when `id` is none of them.
     pub(crate) fn page_action(&mut self, id: &str) -> bool {
@@ -2843,6 +2876,8 @@ impl App {
                 }
                 if self.vehicle_list.is_empty() {
                     self.service_msg = Some(("No vehicles found".into(), 3.0));
+                } else if crate::lan::server_offers().is_some_and(|o| !self.vehicle_list.iter().any(|v| crate::lan::offers(&o, &v.1))) {
+                    self.service_msg = Some(("The server offers none of the vehicles installed here".into(), 4.0));
                 } else {
                     // (as the launcher's bus step: the manufacturer, then the type)
                     self.open_list(crate::game_lists::ListKind::PlaceMaker);
@@ -2908,7 +2943,7 @@ impl App {
                 self.close_game_menu();
             }
             "info" => {
-                self.info_bar = !self.info_bar;
+                self.set_info_bar(!self.info_bar);
                 self.close_game_menu();
             }
             "refuel" | "wash" | "repair" => {
@@ -3451,7 +3486,7 @@ impl App {
                     }
                 }
             }
-            "view_toggle_informationdisplay" => self.info_bar = !self.info_bar,
+            "view_toggle_informationdisplay" => self.set_info_bar(!self.info_bar),
             // (Omsi.exe's camera reset, 0x7edde4, puts back the field of view with the
             // direction: the zoom goes as well, #244)
             "view_reset_direction" => {
@@ -3588,6 +3623,15 @@ impl App {
         }
     }
 
+    /// The information bar on or off, and kept so for the next session (#1164).
+    pub(crate) fn set_info_bar(&mut self, on: bool) {
+        self.info_bar = on;
+        if self.settings.info_bar != on {
+            self.settings.info_bar = on;
+            crate::game_lists::remember_setting("info_bar", if on { "1" } else { "0" });
+        }
+    }
+
     pub(crate) fn toggle_pause(&mut self) {
         // (a LAN session goes on for the others: it cannot be paused)
         if self.lan.is_some() {
@@ -3637,7 +3681,8 @@ impl App {
         let Some(w) = self.world.clone() else { return };
         let date = self.clock.date_code();
         let snow = self.weather.as_ref().is_some_and(|x| x.snow);
-        let season = crate::world_load::season_folder_on(&self.args, &w.global, self.clock.day_of_year, snow).1;
+        let on_road = self.weather.as_ref().is_some_and(|x| x.snow_on_road);
+        let season = crate::world_load::season_folder_on(&self.args, &w.global, self.clock.day_of_year, snow, on_road).1;
         let Some((was_date, was_season)) = self.world_day.clone() else {
             self.world_day = Some((date, omsi_texture::season_folder()));
             return;
@@ -4232,9 +4277,13 @@ impl crate::App {
         if self.player.is_none() {
             v.retain(|x| x.0 != "duty");
         }
-        // ending the route is offered only while there is one
+        // ending the route is offered only while there is one, skipping a stop while its
+        // trip still has one to come
         if self.duty.is_none() {
             v.retain(|x| x.0 != "endduty");
+        }
+        if !self.duty.as_ref().is_some_and(|d| d.stop_to_skip()) {
+            v.retain(|x| x.0 != "skipstop");
         }
         if self.navigator.is_none() {
             v.retain(|x| x.0 != "map");
@@ -4312,7 +4361,7 @@ pub(crate) const SAVES: &str = "Saves";
 
 /// The lines of the game menu: (what, label). What can be set is on the pages behind
 /// "Options", "Vehicle options" and "World options" (see `game_lists`).
-pub(crate) const GAME_MENU: [(&str, &str); 13] = [
+pub(crate) const GAME_MENU: [(&str, &str); 14] = [
     ("resume", "Resume"),
     ("options", "Options..."),
     // (the driver's view - seat, field of view, head movement - straight from the pause
@@ -4322,6 +4371,7 @@ pub(crate) const GAME_MENU: [(&str, &str); 13] = [
     ("world", "World options..."),
     ("map", "City map"),
     ("duty", "Line and tour..."),
+    ("skipstop", "Skip the next stop"),
     ("endduty", "End the tour"),
     ("save", "Save the situation"),
     ("saveslot", "Save to a new slot"),
@@ -4350,17 +4400,13 @@ pub(crate) fn look_key_of(view: &str, cam: Option<(usize, usize)>) -> String {
     }
 }
 
-/// How far the head turns inside the bus: the driver looks over a shoulder (140 degrees
-/// each way, the cab's window pillars and the seat behind), a passenger turns round on
-/// the spot - capped at 140 too, a quarter of the coach stayed out of sight (#909). The
-/// passenger's turn is kept within -180..180 so that letting go of a glance still swings
-/// the short way back.
-pub(crate) fn cab_look_yaw(view: &str, yaw: f32) -> f32 {
-    if view == "pax" {
-        (yaw + 180.0).rem_euclid(360.0) - 180.0
-    } else {
-        yaw.clamp(-140.0, 140.0)
-    }
+/// How far the head turns inside the bus: all the way round, in the driver's seat as in a
+/// passenger's - Omsi.exe's mouse look (0x82c5f8) adds the cursor's way to the camera's
+/// yaw with no stop. Capped at 140 degrees each way, a quarter of the coach stayed out of
+/// sight (#909). The turn is kept within -180..180 so that letting go of a glance still
+/// swings the short way back.
+pub(crate) fn cab_look_yaw(yaw: f32) -> f32 {
+    (yaw + 180.0).rem_euclid(360.0) - 180.0
 }
 
 pub(crate) fn swap_view_look(look: &mut (f32, f32), looks: &mut std::collections::HashMap<String, (f32, f32)>, look_view: &mut String, view: &str) {
@@ -4406,18 +4452,19 @@ mod reach_tests {
 mod cab_look_tests {
     use super::cab_look_yaw;
 
-    /// A passenger turns all the way round (#909); the driver still stops over a shoulder.
+    /// A passenger and the driver turn all the way round, as in Omsi.exe (#909).
     #[test]
-    fn a_passenger_looks_all_the_way_round() {
+    fn the_head_turns_all_the_way_round() {
         let mut yaw = 0.0;
         for _ in 0..40 {
-            yaw = cab_look_yaw("pax", yaw + 10.0);
+            yaw = cab_look_yaw(yaw + 10.0);
         }
         // 400 degrees turned: 40 past straight ahead, the short way
         assert!((yaw - 40.0).abs() < 1e-3, "{yaw}");
-        assert!((cab_look_yaw("pax", 170.0 + 20.0) + 170.0).abs() < 1e-3);
-        assert_eq!(cab_look_yaw("driver", 200.0), 140.0);
-        assert_eq!(cab_look_yaw("driver", -200.0), -140.0);
+        assert!((cab_look_yaw(170.0 + 20.0) + 170.0).abs() < 1e-3);
+        // (the driver looks back down the saloon: no stop at 140 degrees)
+        assert!((cab_look_yaw(175.0) - 175.0).abs() < 1e-3);
+        assert!((cab_look_yaw(-160.0) + 160.0).abs() < 1e-3);
     }
 }
 

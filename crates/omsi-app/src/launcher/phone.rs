@@ -423,9 +423,7 @@ fn bus_sheet(l: &mut Launcher, r: Rect) -> bool {
         .filter(|v| allowed.as_ref().map(|a| a.contains(&norm(&v.file))).unwrap_or(true))
         .map(|v| {
             let mut sub = v.manufacturer.clone();
-            if !v.paints.is_empty() {
-                sub = format!("{sub}{}{} liveries", if sub.is_empty() { "" } else { " · " }, v.paints.len());
-            }
+            sub = format!("{sub}{}{}", if sub.is_empty() { "" } else { " · " }, super::drive::liveries_text(v.paints.len()));
             if !v.missing_packs.is_empty() {
                 sub = format!("{sub} · parts missing");
             }

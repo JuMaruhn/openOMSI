@@ -127,6 +127,8 @@ pub(super) struct Pax {
     pub sub: u8,
     /// The entry or exit asked for (+0x640).
     pub door: Option<usize>,
+    /// The validator they stamp at (an index into the cabin's: a bus may have several).
+    pub stamper: Option<usize>,
     /// `HeightOfSeat` (+0x648) and `PAX_State` (+0x64c: 0 stand, 1 walk, 2 sit).
     pub seat_h: f32,
     pub pax_state: f32,
@@ -204,6 +206,7 @@ impl Pax {
             bad_change: false,
             sub: 0,
             door: None,
+            stamper: None,
             seat_h: 0.0,
             pax_state: 0.0,
             timer: 0.0,
@@ -389,6 +392,131 @@ pub(super) struct BusAtStops {
     pub all_exit: bool,
 }
 
+/// The trip the player's duty has the bus on, as the people at the stops see it.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct DutyTrip {
+    /// Which trip it is (its name and departure), to notice the next one.
+    pub name: String,
+    pub departure: f64,
+    /// Its terminus as the timetable has it: what the stops' line records list.
+    pub terminus: String,
+    /// It has a line: not a works trip to or from the depot (whose stations it passes).
+    pub public: bool,
+    /// Its stops in order: the object, its timetable name (what the destinations of the
+    /// people waiting are made of) and whether the bus stops there.
+    pub stops: Vec<(i64, String, bool)>,
+}
+
+impl DutyTrip {
+    /// Duty trip `trip`, its stops named as `names` (`Schedule::stop_names`) has them: by the
+    /// object's id where it does not know the object, as the stops' targets are.
+    pub(super) fn of(trip: &crate::schedule::PlannedTrip, names: Option<&HashMap<i64, String>>) -> DutyTrip {
+        let name = |s: &crate::schedule::PlannedStop| match names {
+            Some(n) => n.get(&s.object_id).cloned().unwrap_or_else(|| s.object_id.to_string()),
+            None => s.name.trim().to_string(),
+        };
+        DutyTrip {
+            name: trip.name.clone(),
+            departure: trip.departure,
+            terminus: trip.terminus.trim().to_string(),
+            public: !trip.line.trim().is_empty(),
+            stops: trip.stops.iter().map(|s| (s.object_id, name(s), s.stops)).collect(),
+        }
+    }
+}
+
+/// Whom a bus takes on at the stops (see `at_stop` and `fit`).
+#[derive(Debug, Clone)]
+pub(super) enum Takes {
+    /// Those whose line record lists its terminus, as in Omsi.exe: a timetable bus.
+    Terminus,
+    /// The player's bus on a duty: those as well whom its trip takes where they are going,
+    /// however the bus's depot file spells the terminus. `next` is the stop of the trip the
+    /// duty is due at, `done` that the trip has reached its last stop.
+    Duty { trip: Arc<DutyTrip>, next: usize, done: bool },
+    /// Nobody waiting: the player's bus in free drive (its riders get off as ever), another
+    /// player's bus (their game boards it), a bus the player left standing.
+    Nobody,
+}
+
+/// What a bus near a stop does there (sub_61f238 from 0x61f3e3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AtStop {
+    /// Everybody gets off and nobody on: the bus shows no destination (it is not in
+    /// service), or it is at its terminus.
+    Empties,
+    /// It is listed at the stop: the people waiting there may take it.
+    Serves,
+    /// Only its riders get off there: the people waiting leave it alone.
+    Passes,
+}
+
+/// What a bus showing `terminus` (None: no destination, or one of `[addterminus_allexit]`)
+/// and taking `takes` does at stop `id`.
+pub(super) fn at_stop(id: i64, stop: &PaxStop, terminus: Option<&str>, takes: &Takes) -> AtStop {
+    let Some(t) = terminus else { return AtStop::Empties };
+    if stop.is_named(t) {
+        return AtStop::Empties;
+    }
+    match takes {
+        Takes::Nobody => AtStop::Passes,
+        // the trip's last stop is its terminus, whatever the depot file calls it
+        Takes::Duty { trip, done: true, .. }
+            if trip.stops.iter().rev().find(|s| s.2).is_some_and(|(k, n, _)| *k == id || stop.is_named(n)) =>
+        {
+            AtStop::Empties
+        }
+        _ => AtStop::Serves,
+    }
+}
+
+/// Why somebody waiting takes a bus (`fit`); the better first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Fit {
+    /// Its terminus is on their line record (sub_61c33c: Omsi.exe's only test).
+    Terminus,
+    /// The player's duty takes them where they are going: its trip's terminus is on the
+    /// record, or their destination is a later stop of the trip than theirs.
+    Duty,
+    /// They have no line record: the first bus listed (sub_61c33c).
+    Any,
+}
+
+/// Of the buses somebody waiting may take (bus, why, how far away), the one with the better
+/// reason (`Fit`), of those the nearest.
+pub(super) fn best_bus(buses: impl Iterator<Item = (BusId, Fit, f64)>) -> Option<(BusId, Fit)> {
+    buses.min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2))).map(|b| (b.0, b.1))
+}
+
+/// Whether a bus showing `terminus` and taking `takes` is the bus of somebody waiting at stop
+/// `id` for `dest`, whose line record there lists `termini`; why.
+///
+/// Omsi.exe compares the names alone: the destination the bus's depot file gives it with
+/// the timetable's termini. A depot file that spells them another way (another case, a
+/// shortened name, the terminus of another variant of the line, a file made for another
+/// map) left the people at every stop of a duty waiting for another bus. The duty knows
+/// the trip: whoever it takes where they are going gets on.
+pub(super) fn fit(id: i64, stop: &PaxStop, dest: Option<&str>, termini: &HashSet<String>, terminus: &str, takes: &Takes) -> Option<Fit> {
+    if termini.contains(terminus.trim()) {
+        return Some(Fit::Terminus);
+    }
+    let Takes::Duty { trip, next, done: false } = takes else { return None };
+    if !trip.public {
+        return None;
+    }
+    if termini.contains(&trip.terminus) {
+        return Some(Fit::Duty);
+    }
+    let dest = dest?.trim();
+    // this stop where the trip still calls at it (from the one before the stop the duty is
+    // due at: it counts a stop served 35 m on), and their destination after it
+    let here = (next.saturating_sub(1)..trip.stops.len()).find(|k| {
+        let (sid, name, stops) = &trip.stops[*k];
+        *stops && (*sid == id || stop.is_named(name))
+    })?;
+    trip.stops[here + 1..].iter().any(|(_, name, stops)| *stops && name.trim() == dest).then_some(Fit::Duty)
+}
+
 /// A point of the cabin's path network with its links in the file's order: the point at
 /// the other end, the points reached through it (sub_72410c), the link's index, its room
 /// height and step sounds.
@@ -496,11 +624,43 @@ impl Cabin {
         }
         if found.is_none() {
             if !(avoid && flags.is_some()) {
+                // (a list narrowed to the sections somebody is in, #718: the first door of
+                // theirs, not the first of the list - another section's, left out)
+                if self.groups > 1 {
+                    return list.iter().flatten().next().copied();
+                }
                 return list.first().copied().flatten();
             }
             return self.omsi_nearest(p, list, false, level, flags, open);
         }
         found
+    }
+
+    /// The validator nearest `p` (bus frame, the height weighed as in `omsi_nearest`): the
+    /// one a passenger who came in there stamps at. The first of equally near ones; in a
+    /// cabin of sections nobody walks between, one in the sections of `p`'s nearest point.
+    pub(super) fn nearest_stamper(&self, p: Vec3) -> Option<usize> {
+        let at = |s: &(Option<usize>, Vec3)| s.0.and_then(|k| self.graph.points.get(k).copied()).unwrap_or(s.1);
+        let d = |k: usize| weighted_dist(p, at(&self.stampers[k]), 5.0);
+        let group = self.group_at(self.omsi_nearest(p, &self.all_points(), false, false, None, None));
+        (0..self.stampers.len())
+            .filter(|&k| self.groups <= 1 || self.group_at(self.stampers[k].0) == group)
+            .min_by(|&a, &b| d(a).total_cmp(&d(b)))
+    }
+
+    /// The group of sections path point `p` lies in (see `groups`).
+    pub(super) fn group_at(&self, p: Option<usize>) -> Option<usize> {
+        p.and_then(|q| self.point_group.get(q).copied())
+    }
+
+    /// The points of `list` in group `g`, the others left out (None): where a trailer hangs
+    /// on that nobody walks into from the bus (#718), a passenger keeps to the sections they
+    /// are in - the doors and devices of the others are out of reach. One group: `list`.
+    pub(super) fn in_group(&self, list: Vec<Option<usize>>, g: Option<usize>) -> Vec<Option<usize>> {
+        match g {
+            Some(g) if self.groups > 1 => list.into_iter().map(|p| p.filter(|&q| self.point_group.get(q) == Some(&g))).collect(),
+            _ => list,
+        }
     }
 
     /// sub_723fac: the next point from `from` towards `to` and the link taken.
@@ -585,14 +745,14 @@ impl Humans {
                     reg.next = Some(*id);
                 }
                 // a bus not in service, or at its own terminus, empties and takes nobody
-                // (0x61f3e3)
-                let terminus_here = match &bn.terminus {
-                    None => true,
-                    Some(t) => s.is_named(t),
-                };
-                if terminus_here {
-                    reg.all_exit = true;
-                    continue;
+                // (0x61f3e3); one in free drive only lets its riders off
+                match at_stop(*id, s, bn.terminus.as_deref(), &bn.takes) {
+                    AtStop::Empties => {
+                        reg.all_exit = true;
+                        continue;
+                    }
+                    AtStop::Passes => continue,
+                    AtStop::Serves => {}
                 }
                 if same_way {
                     let lateral = d.truncate().dot(s_right);
@@ -606,31 +766,22 @@ impl Humans {
         out
     }
 
-    /// sub_61c33c: the bus at stop `stop` person `i` gets into: with a line record, the
-    /// nearest of the buses listed whose terminus goes there; without, the first listed.
-    pub(super) fn bus_for(&self, i: usize, stop: i64, buses: &[BusNow], bus_ix: &HashMap<BusId, usize>) -> Option<BusId> {
+    /// sub_61c33c: the bus at stop `stop` person `i` gets into, and why: with a line record,
+    /// the nearest of the buses listed whose terminus goes there - else the nearest whose
+    /// duty takes them there (`fit`); without, the first listed.
+    pub(super) fn bus_for(&self, i: usize, stop: i64, buses: &[BusNow], bus_ix: &HashMap<BusId, usize>) -> Option<(BusId, Fit)> {
         let s = self.stops.get(&stop)?;
         let p = self.pax(i)?;
         match p.line.and_then(|k| s.lines.get(k)) {
-            None => s.buses.first().map(|b| b.0),
-            Some((_, termini)) => {
-                let mut best: Option<(f64, BusId)> = None;
-                for (id, _) in &s.buses {
-                    let Some(bn) = bus_ix.get(id).map(|k| &buses[*k]) else { continue };
-                    if bn.cabin.entries.is_empty() {
-                        continue;
-                    }
-                    let Some(t) = &bn.terminus else { continue };
-                    if !termini.contains(t.trim()) {
-                        continue;
-                    }
-                    let d = (bn.pos - self.people[i].position).length();
-                    if best.is_none_or(|b| d < b.0) {
-                        best = Some((d, *id));
-                    }
+            None => s.buses.first().map(|b| (b.0, Fit::Any)),
+            Some((_, termini)) => best_bus(s.buses.iter().filter_map(|(id, _)| {
+                let bn = bus_ix.get(id).map(|k| &buses[*k])?;
+                if bn.cabin.entries.is_empty() {
+                    return None;
                 }
-                best.map(|b| b.1)
-            }
+                let f = fit(stop, s, p.dest.as_deref(), termini, bn.terminus.as_deref()?, &bn.takes)?;
+                Some((*id, f, (bn.pos - self.people[i].position).length()))
+            })),
         }
     }
 
@@ -642,13 +793,14 @@ impl Humans {
         self.stops.get(&stop).is_some_and(|s| s.buses.iter().any(|b| b.0 == bus))
     }
 
-    /// sub_7e910c: a free place of the bus, at random (none free: nobody gets on).
-    pub(super) fn reserve_place(&mut self, bus: BusId, n: usize) -> Option<usize> {
+    /// sub_7e910c: a free place of the bus, at random (none free: nobody gets on). `off`:
+    /// the places its scripts have switched off (#721), which nobody takes.
+    pub(super) fn reserve_place(&mut self, bus: BusId, n: usize, off: &[bool]) -> Option<usize> {
         let seats = self.seats.entry(bus).or_insert_with(|| vec![false; n]);
         if seats.len() < n {
             seats.resize(n, false);
         }
-        let free: Vec<usize> = (0..n).filter(|k| !seats[*k]).collect();
+        let free: Vec<usize> = (0..n).filter(|k| !seats[*k] && !off.get(*k).copied().unwrap_or(false)).collect();
         if free.is_empty() {
             return None;
         }
@@ -662,7 +814,7 @@ impl Humans {
     pub(super) fn decide_pax_ticket(&mut self, i: usize, bn: &BusNow) -> (u8, u8) {
         let Some(tp) = self.tickets.clone() else { return (TICKET_NONE, 0) };
         let mut r = self.rand_f() as f32;
-        if bn.cabin.stamper.is_some() {
+        if !bn.cabin.stampers.is_empty() {
             if r < tp.stamper_prop {
                 return (TICKET_STAMP, 0);
             }
@@ -721,15 +873,58 @@ impl Humans {
             }
             self.pax_tick(i, dt, world, buses, bus_ix, at_stops, player_bus, renderer, scene, taken_ticket, remove);
         }
+        // (where every passenger stands: in a bus's frame, or the world's - and the people
+        // walking the pavement, among them a rider who has just stepped off, still on the
+        // step until they are clear of the door. Not those who stand where they got off
+        // with no pavement to go on along: they would hold the door open for good.)
+        let at: Vec<(Option<BusId>, DVec3)> = self
+            .people
+            .iter()
+            .filter_map(|p| match &p.state {
+                State::Pax(x) => Some((x.inside, x.pos)),
+                State::Strolling(_) => Some((None, p.position)),
+                _ => None,
+            })
+            .collect();
+        let busy: HashMap<BusId, (Vec<bool>, Vec<bool>)> = buses.iter().map(|bn| (bn.id, doorways_taken(bn, &at))).collect();
+        if debug_pax() {
+            for (b, (e, x)) in &busy {
+                let before = self.pax_busy.get(b);
+                for (kind, now, was) in [("entry", e, before.map(|o| &o.0)), ("exit", x, before.map(|o| &o.1))] {
+                    for (k, on) in now.iter().enumerate() {
+                        if was.and_then(|w| w.get(k)).copied().unwrap_or(false) != *on {
+                            log::info!("t={:.1} bus {b:?} {kind} {k}: {}", self.time, if *on { "somebody in the doorway" } else { "the doorway is free" });
+                        }
+                    }
+                }
+            }
+        }
+        self.pax_busy = busy;
+        // the places' own occupancy variables (#721): the riders at their places
+        let sitting: Vec<(BusId, usize)> = self
+            .people
+            .iter()
+            .filter_map(|p| match &p.state {
+                State::Pax(x) if x.task == Task::SittingInBus => Some((x.inside?, x.seat?)),
+                _ => None,
+            })
+            .collect();
+        self.pax_places = buses.iter().map(|bn| (bn.id, places_taken(bn, &sitting))).collect();
         // the player's bus reads its requests from `entry_req` / `exit_req`
         if let Some((e, x)) = self.pax_req.get(&BusId::Player) {
             self.entry_req = e.clone();
             self.exit_req = x.clone();
         }
+        if let Some((e, x)) = self.pax_busy.get(&BusId::Player) {
+            self.entry_busy = e.clone();
+            self.exit_busy = x.clone();
+        }
         self.ai_requests.clear();
         for (b, (e, x)) in &self.pax_req {
             if let BusId::Ai(id) = b {
-                self.ai_requests.push((*id, e.clone(), x.clone()));
+                let (entry_busy, exit_busy) = self.pax_busy.get(b).cloned().unwrap_or_default();
+                let places = self.pax_places.get(b).cloned().unwrap_or_default();
+                self.ai_requests.push((*id, DoorWants { entry_req: e.clone(), exit_req: x.clone(), entry_busy, exit_busy, places }));
             }
         }
         // timetable buses wait while people still get on or off (0x7d9e8b - 0x7d9f5e):
@@ -1234,8 +1429,11 @@ impl Humans {
                 }
                 let ticket = p.ticket;
                 match ticket {
-                    TICKET_STAMP => p.pt_target = bn.cabin.stamper.and_then(|s| s.0),
-                    TICKET_BUY => p.pt_target = bn.cabin.sale.and_then(|s| s.0),
+                    TICKET_STAMP => {
+                        p.stamper = bn.cabin.nearest_stamper(local);
+                        p.pt_target = p.stamper.and_then(|k| bn.cabin.stampers[k].0);
+                    }
+                    TICKET_BUY => p.pt_target = bn.cabin.in_group(vec![bn.cabin.sale.and_then(|s| s.0)], bn.cabin.group_at(p.pt))[0],
                     _ => self.route_to_place(i, bn),
                 }
                 let p = self.pax_mut(i).unwrap();
@@ -1264,7 +1462,8 @@ impl Humans {
                     p.pos = q.as_dvec3();
                 }
                 let here = p.pos.as_vec3();
-                // the nearest exit (sub_62a49c / sub_62a5a8)
+                // the nearest exit (sub_62a49c / sub_62a5a8), of the sections they are in
+                let exits = bn.cabin.in_group(exits, bn.cabin.group_at(start));
                 p.pt_target = bn.cabin.omsi_nearest(here, &exits, false, false, None, None);
                 p.door = p.pt_target.and_then(|t| exits.iter().position(|e| *e == Some(t)));
                 if let Some(d) = p.door {
@@ -1358,9 +1557,11 @@ impl Humans {
             Some(_) => p.pos.as_vec3(),
             None => bn.to_local(p.pos),
         };
-        let list = bn.cabin.entry_points();
+        // (the doors of the sections of the place reserved)
+        let group = p.seat.and_then(|k| bn.cabin.seats.get(k)).map(|s| s.group);
+        let list = bn.cabin.in_group(bn.cabin.entry_points(), group);
         let flags = bn.cabin.entry_flags();
-        let open: Vec<bool> = (0..list.len()).map(|k| bn.entry_open.get(k.min(7)).copied().unwrap_or(false)).collect();
+        let open: Vec<bool> = (0..list.len()).map(|k| bn.entry_open.get(k).copied().unwrap_or(false)).collect();
         let pt = bn.cabin.omsi_nearest(here, &list, p.ticket == TICKET_BUY, false, Some(&flags), Some(&open));
         let p = self.pax_mut(i).unwrap();
         if let Some(q) = pt.and_then(|k| bn.cabin.graph.points.get(k)) {
@@ -1449,11 +1650,15 @@ impl Humans {
                     }
                     return;
                 };
+                let (b, why) = b;
                 let Some(bn) = bus_ix.get(&b).map(|k| &buses[*k]) else { return };
                 self.pax_mut(i).unwrap().bus = Some(b);
                 // still rolling in, or standing in the stop's box: to the gather point
                 if bn.speed.abs() <= 2.0 && !self.in_stop_box(stop, b) {
                     return;
+                }
+                if super::debug_pax() {
+                    log::info!("t={:.1} pax {} at stop {stop} for {:?}: bus {b:?} showing {:?} ({why:?})", self.time, self.people[i].label(), p.dest, bn.terminus);
                 }
                 self.set_task(i, Task::ToBus, buses, bus_ix, world);
             }
@@ -1461,7 +1666,7 @@ impl Humans {
                 let Some(stop) = p.stop else { return };
                 if let Some(bn) = bn {
                     if bn.speed.abs() < 3.0 && self.in_stop_box(stop, bn.id) {
-                        if let Some(k) = self.reserve_place(bn.id, bn.cabin.seats.len()) {
+                        if let Some(k) = self.reserve_place(bn.id, bn.cabin.seats.len(), &bn.places_off) {
                             let (tk, id) = self.decide_pax_ticket(i, bn);
                             let price = self.tickets.as_ref().and_then(|t| t.tickets.get(id.saturating_sub(1) as usize)).map(|t| t.value).unwrap_or(0.0);
                             let pp = self.pax_mut(i).unwrap();
@@ -1532,7 +1737,7 @@ impl Humans {
             return;
         };
         let door_x = p.door.and_then(|d| bn.cabin.entries.get(d)).map(|e| e.inside.x).unwrap_or(0.0);
-        let open = p.door.map(|d| bn.entry_open.get(d.min(7)).copied().unwrap_or(false)).unwrap_or(false);
+        let open = p.door.map(|d| bn.entry_open.get(d).copied().unwrap_or(false)).unwrap_or(false);
         {
             let pp = self.pax_mut(i).unwrap();
             pp.clamp = true;
@@ -1561,7 +1766,7 @@ impl Humans {
         if ok {
             if p.st != 3 {
                 self.choose_entry(i, buses, bus_ix);
-                let open = self.pax(i).unwrap().door.map(|d| bn.entry_open.get(d.min(7)).copied().unwrap_or(false)).unwrap_or(false);
+                let open = self.pax(i).unwrap().door.map(|d| bn.entry_open.get(d).copied().unwrap_or(false)).unwrap_or(false);
                 let pp = self.pax_mut(i).unwrap();
                 pp.short = !open;
                 pp.st = 1;
@@ -1617,7 +1822,7 @@ impl Humans {
                 pp.st = 9;
                 pp.smooth = true;
                 if pp.ticket == TICKET_STAMP {
-                    if let Some((_, dev)) = bn.cabin.stamper {
+                    if let Some(&(_, dev)) = pp.stamper.and_then(|k| bn.cabin.stampers.get(k)) {
                         pp.target = dev.as_dvec3();
                         pp.target_bus = true;
                         pp.reach_at = dev;
@@ -1646,7 +1851,7 @@ impl Humans {
             } else if p.sub == 2 && p.timer <= 0.0 {
                 self.route_to_place(i, bn);
                 let pp = self.pax_mut(i).unwrap();
-                pp.pt = bn.cabin.stamper.and_then(|s| s.0);
+                pp.pt = pp.stamper.and_then(|k| bn.cabin.stampers.get(k)).and_then(|s| s.0);
                 pp.ticket = TICKET_NONE;
                 pp.sub = 0;
             }
@@ -1664,7 +1869,7 @@ impl Humans {
         if bn.speed.abs() >= 1.0 {
             self.pax_mut(i).unwrap().timer = 1.0;
         }
-        let door_open = p.door.map(|d| bn.exit_open.get(d.min(7)).copied().unwrap_or(false)).unwrap_or(false);
+        let door_open = p.door.map(|d| bn.exit_open.get(d).copied().unwrap_or(false)).unwrap_or(false);
         let may_leave = door_open && (reg.next.is_some() || p.complaint == 3);
         self.pax_mut(i).unwrap().short = !may_leave;
         let out = p.st == 7 && bn.speed.abs() < 1.0 && may_leave;
@@ -1684,11 +1889,13 @@ impl Humans {
                 // frame from the nearest point, and whoever had left a point was pulled back
                 // to it - the people coming down from the upper deck never got off the stairs.
                 self.pax_mut(i).unwrap().timer = 1.0;
-                let exits = bn.cabin.exit_points();
                 let all = bn.cabin.all_points();
-                let open: Vec<bool> = (0..exits.len()).map(|k| bn.exit_open.get(k.min(7)).copied().unwrap_or(false)).collect();
                 let pp = self.pax_mut(i).unwrap();
                 let here = pp.pos.as_vec3();
+                // (the exits of the sections they are in)
+                let group = bn.cabin.group_at(pp.pt.or_else(|| bn.cabin.omsi_nearest(here, &all, false, false, None, None)));
+                let exits = bn.cabin.in_group(bn.cabin.exit_points(), group);
+                let open: Vec<bool> = (0..exits.len()).map(|k| bn.exit_open.get(k).copied().unwrap_or(false)).collect();
                 let target = bn.cabin.omsi_nearest(here, &exits, false, false, None, Some(&open));
                 if pp.st == 5 {
                     // walking: on from the point walked to, towards the new door (Omsi.exe
@@ -2167,6 +2374,120 @@ mod tests {
             x += (1.0 - x) * 0.1;
         }
         assert!((x - 0.271).abs() < 1e-3);
+    }
+
+    fn test_stop(name: &str, alias: &str) -> PaxStop {
+        PaxStop {
+            name: name.into(),
+            alias: alias.into(),
+            pos: DVec3::ZERO,
+            heading: 0.0,
+            gather: DVec3::ZERO,
+            spots: Vec::new(),
+            taken: Vec::new(),
+            enter_max: 1.0,
+            enter_min: 0.0,
+            length: 30.0,
+            lane: None,
+            was_near: false,
+            near: false,
+            clock_ms: 0.0,
+            want: 0,
+            factor: 1.0,
+            buses: Vec::new(),
+            dests: Vec::new(),
+            lines: Vec::new(),
+        }
+    }
+
+    /// The player's bus on a duty takes the people its trip takes where they are going,
+    /// whatever its depot file calls the terminus; in free drive, or with no destination
+    /// shown, nobody; a bus whose terminus is on their line record comes first.
+    #[test]
+    fn who_boards_the_players_bus() {
+        // line 76 from Bauernhof (stop 10) by Kirche to Endstation; the depot file calls the
+        // terminus "Endstation Grundorf", the timetable "Endstation"
+        let trip = |name: &str| crate::schedule::PlannedStop {
+            object_id: match name {
+                "Bauernhof" => 10,
+                "Kirche" => 11,
+                "Depot" => 13,
+                _ => 12,
+            },
+            name: format!("{name} "),
+            arr: 0.0,
+            dep: 0.0,
+            position: None,
+            dir: Default::default(),
+            stops: name != "Depot",
+        };
+        let planned = crate::schedule::PlannedTrip {
+            name: "76-1".into(),
+            line: "76".into(),
+            terminus: "Endstation ".into(),
+            departure: 8.0 * 3600.0,
+            end: 9.0 * 3600.0,
+            stops: ["Bauernhof", "Depot", "Kirche", "Endstation"].into_iter().map(trip).collect(),
+        };
+        // (named as the timetable's Busstops.cfg names the objects; one it does not know by
+        // its id)
+        let names: HashMap<i64, String> = [(10, "Bauernhof".to_string()), (11, "Kirche".to_string()), (13, "Depot".to_string())].into_iter().collect();
+        let dt = Arc::new(DutyTrip::of(&planned, Some(&names)));
+        assert_eq!(dt.terminus, "Endstation");
+        assert_eq!(dt.stops.iter().map(|s| s.1.as_str()).collect::<Vec<_>>(), ["Bauernhof", "Depot", "Kirche", "12"]);
+        let duty = |next: usize, done: bool| Takes::Duty { trip: dt.clone(), next, done };
+        let here = test_stop("Bauernhof Grundorf", "Bauernhof");
+        let set = |t: &[&str]| t.iter().map(|x| x.to_string()).collect::<HashSet<String>>();
+        let shown = "Endstation Grundorf";
+
+        // on the duty with the destination shown: at the stop, and on the line record
+        // whatever spelling the depot file has
+        assert_eq!(at_stop(10, &here, Some(shown), &duty(0, false)), AtStop::Serves);
+        assert_eq!(fit(10, &here, Some("Kirche"), &set(&["Endstation"]), shown, &duty(0, false)), Some(Fit::Duty));
+        // a record that does not list the trip's terminus at all (made of another variant's
+        // trips): the trip goes to their stop all the same
+        assert_eq!(fit(10, &here, Some("Kirche"), &set(&["Waldweg"]), shown, &duty(0, false)), Some(Fit::Duty));
+        assert_eq!(fit(10, &here, Some("12"), &set(&["Waldweg"]), shown, &duty(0, false)), Some(Fit::Duty));
+        // ... but not somebody whose stop the trip does not go to, nor one it only passes
+        assert_eq!(fit(10, &here, Some("Waldweg"), &set(&["Waldweg"]), shown, &duty(0, false)), None);
+        assert_eq!(fit(10, &here, Some("Depot"), &set(&["Waldweg"]), shown, &duty(0, false)), None);
+        // nor at a stop the trip has left behind, or does not call at
+        assert_eq!(fit(10, &here, Some("Kirche"), &set(&["Waldweg"]), shown, &duty(3, false)), None);
+        assert_eq!(fit(20, &test_stop("Am Teich", "Am Teich"), Some("Kirche"), &set(&["Waldweg"]), shown, &duty(0, false)), None);
+        // another platform of the stop's name will do
+        assert_eq!(fit(14, &test_stop("Bauernhof 2", "Bauernhof"), Some("Kirche"), &set(&["Waldweg"]), shown, &duty(0, false)), Some(Fit::Duty));
+        // the depot file's terminus on the record: the bus is theirs as in Omsi.exe
+        assert_eq!(fit(10, &here, Some("Kirche"), &set(&["Endstation Grundorf"]), shown, &duty(0, false)), Some(Fit::Terminus));
+
+        // free drive: nobody waiting gets on, the riders get off at their stops
+        assert_eq!(at_stop(10, &here, Some(shown), &Takes::Nobody), AtStop::Passes);
+        assert_eq!(fit(10, &here, Some("Kirche"), &set(&["Endstation"]), shown, &Takes::Nobody), None);
+        // no destination shown (or "Nicht einsteigen"): it empties and takes nobody, duty or not
+        assert_eq!(at_stop(10, &here, None, &duty(0, false)), AtStop::Empties);
+        assert_eq!(at_stop(10, &here, None, &Takes::Nobody), AtStop::Empties);
+        // at the trip's last stop it empties too, whatever the depot file calls it ...
+        let end = test_stop("Endstation Grundorf Wendeschleife", "12");
+        assert_eq!(at_stop(12, &end, Some(shown), &duty(3, true)), AtStop::Empties);
+        assert_eq!(at_stop(12, &end, Some(shown), &duty(3, false)), AtStop::Serves);
+        // ... and as at the terminus it shows
+        assert_eq!(at_stop(12, &test_stop("Endstation Grundorf", ""), Some(shown), &duty(3, false)), AtStop::Empties);
+        // a finished trip takes nobody by the duty, nor a works trip from the depot
+        assert_eq!(fit(10, &here, Some("Kirche"), &set(&["Endstation"]), shown, &duty(0, true)), None);
+        let works = Takes::Duty { trip: Arc::new(DutyTrip::of(&crate::schedule::PlannedTrip { line: String::new(), ..planned.clone() }, Some(&names))), next: 0, done: false };
+        assert_eq!(fit(10, &here, Some("Kirche"), &set(&["Endstation"]), shown, &works), None);
+        assert_eq!(fit(10, &here, Some("Kirche"), &set(&["Endstation Grundorf"]), shown, &works), Some(Fit::Terminus));
+
+        // a timetable bus: as in Omsi.exe, the terminus on the record or nothing
+        assert_eq!(at_stop(10, &here, Some("Endstation"), &Takes::Terminus), AtStop::Serves);
+        assert_eq!(fit(10, &here, Some("Kirche"), &set(&["Endstation"]), "Endstation", &Takes::Terminus), Some(Fit::Terminus));
+        assert_eq!(fit(10, &here, Some("Kirche"), &set(&["Endstation"]), "Endstation Grundorf", &Takes::Terminus), None);
+
+        // two buses at the stop: the one whose terminus is on the record, though further
+        let (ai, me) = (BusId::Ai(5), BusId::Player);
+        assert_eq!(best_bus([(me, Fit::Duty, 5.0), (ai, Fit::Terminus, 30.0)].into_iter()), Some((ai, Fit::Terminus)));
+        assert_eq!(best_bus([(ai, Fit::Terminus, 30.0), (me, Fit::Terminus, 5.0)].into_iter()), Some((me, Fit::Terminus)));
+        assert_eq!(best_bus([(me, Fit::Duty, 5.0)].into_iter()), Some((me, Fit::Duty)));
+        assert_eq!(best_bus(std::iter::empty()), None);
     }
 
     #[test]

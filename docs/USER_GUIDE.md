@@ -85,12 +85,15 @@ and less (at 50 km/h a fifth as far), so the wheel feels heavier the faster the 
 the first second after switching it on the wheel and the pedals ease towards the cursor.
 Settings → Driving → *Mouse steering sensitivity* makes it more or less sensitive (100 % = OMSI).
 Mouse steering works in the driver's, the passenger and the outside view; the wheel follows
-the cursor smoothly (a short easing, no steps).
+the cursor smoothly (a short easing, no steps). With *Smooth mouse steering* off (Settings →
+Driving) the wheel and the pedals are where the cursor says at once, as in OMSI.
 
 Two switches there change the steering keys (both off by default): *Steering linearity* turns
 the wheel at OMSI's own steady pace (the curvature grows by the same amount every millisecond
 the key is held, whatever the bus), and *Old Steering* is OMSI's wheel that stays where you
-leave it - turn it back yourself. The clutch key works as in OMSI: the pedal goes down at once
+leave it - turn it back yourself. **Num 5** (`steering_neutral`) brings the wheel back to the
+middle in a straight line, as in OMSI at the pace the keys turn it (never slower than the
+wheel comes back by itself). The clutch key works as in OMSI: the pedal goes down at once
 and comes up slowly (0.7 per second) when the key is released.
 
 Left-click a cockpit switch to operate it, hold the button and move the mouse to turn a knob,
@@ -115,7 +118,8 @@ LAN session. Esc opens the game menu: drive the next placed vehicle, place any v
 the installation in front of the camera (or beside the bus), couple what stands close behind
 the bus and uncouple it again, save the situation or load the quicksave, the next weather, the clock an hour on or back, refuel and wash (only at a
 petrol station, as in OMSI), repair (the team needs the map's travel time when the bus stands
-in no depot yard), screenshot, timetable, the object editor (below), quit. Its *Options* hold
+in no depot yard), screenshot, timetable, skip the duty's next stop (also **Ctrl+Shift+H**: for a
+stop the bus cannot reach or never registers at), the object editor (below), quit. Its *Options* hold
 one line a setting under the launcher's headings (Simulation, Display & sound, Driving,
 Camera): **Left** and **Right** (or a click on the arrows round the value) step it down and
 up, Enter as before; they are kept for the next game. Home is the ticket desk camera and Insert the timetable view (as OMSI's keyboard.cfg binds them), and the
@@ -123,6 +127,13 @@ change keys of keyboard.cfg hand out or take back the change. The HUD
 shows time, speed, line, next stop, delay and what the workshop just did (and why the bus
 stands: the parking brake, low air pressure, a line the date's chrono takes off), and the
 controls for the first seconds.
+
+On a duty the game keeps a **journey log** in the content folder's `Journeys` (one text file
+a duty, named by the real date and time it began and the line and tour): each trip driven
+with its stops, their planned and actual arrival and departure and how far off those were,
+and whether the bus came late (over 3 minutes), left early (over 2 minutes, as the personnel
+file counts them) or missed a stop. It is written again at every stop, so a crash loses
+nothing - what virtual bus companies ask their drivers for.
 
 ## The launcher
 
@@ -173,7 +184,8 @@ again only when something changes; drag on it to turn the bus, scroll to zoom. I
   an edge, plus the scripts' shaking, `FF_Vib_Amp`. A wheel nobody has set up steers with
   its X axis. A wheel that a community controller mapping also makes a gamepad (a
   Logitech G29) is listed once, and *Use this device* switches any device off
-  (it is then neither read nor listed as steering). Select a device to adjust *Steering force*
+  (it is then neither read nor listed as steering); **Remove this device** (clicked twice) takes
+  one out of the list, kept so by **Save**. Select a device to adjust *Steering force*
   (centering and resistance) and *Vibration* separately, then press **Save**. The values are stored
   for that device in the content folder's `Inputs/gamectrler.cfg`; restart a running game to use
   the new values. *Force feedback and vibration* in Settings → Driving remains the global on/off switch.
@@ -277,7 +289,8 @@ the panel's own light, and the glow draws a halo around them), `led_mips` (0..4,
 this. 0 point-samples them, the sharpest dots and the worst shimmer; 1.3 keeps a matrix's
 dots a couple of pixels across where the full chain has run them together; 4 is near the
 calm of the full chain), `mouse_sens` (mouse steering,
-1 = OMSI's), `ui_scale` (the size of the game's interface over the picture - its texts,
+1 = OMSI's), `mouse_smooth` (0: the mouse's wheel follows the cursor without easing),
+`ui_scale` (the size of the game's interface over the picture - its texts,
 the menu, the timetable, the navigator and the city map - from 0.5 to 2, 1 by default, on
 top of the screen's own scaling; on a window taller than 1080 lines the interface grows with
 it as well, up to twice, unless `ui_scale_window` is off; `notes` off hides the notes in the
@@ -304,6 +317,12 @@ cabin's `[ticket_sale]` names, turn to the driver, put the money down, take thei
 themselves after a moment and walk on; `pay` - they wait for the driver to sell the ticket
 (the bus's printer, or **T**) and give up after 25 s; `walk` - straight into the saloon,
 no cash desk (flat fare / ticket machines). People keep a body's width apart outside.
+Who gets on the player's bus: on a duty (a line and tour, or a trip) with a destination on
+the display, the people waiting for a stop the trip calls at later - also where the bus's
+depot file (`.hof`) names the terminus otherwise than the map's timetable does - and those
+whose line record lists the terminus shown; everybody gets off at the trip's last stop. In
+free drive, or with no destination set (or a "not in service" one), nobody waiting gets on;
+the riders aboard still get off at their stops.
 `exact_fare=0` makes them overpay so that change is due. Rain and snow stay outside the
 player's bus (its `[boundingbox]`), and heavy rain darkens the day enough for the saloon
 lights to matter.
@@ -335,12 +354,26 @@ snow-covered roads and mirror views skip these passes. Reflections beyond the lo
 plane use screen-space rays; objects unavailable to those rays keep the sky reflection.
 OpenGL uses the sky reflection too.
 
+On a wet road every vehicle's tyres throw up spray, in all three graphics modes: the player's
+bus, the AI cars and buses, other players' buses. Through standing water a wheel throws a fan
+of water back and up behind it and a mist that hangs behind the vehicle, drifts with the air
+and settles; a road that is only wet through gives a thin haze at speed. It grows with the
+square of the speed and with the depth of the puddle (next to nothing at walking pace, a cloud
+at 50 km/h), and a bus or a lorry throws more than a car. Some vehicles spray through their own
+wheel `[smoke]` driven by `tire_wet_freq`/`tire_wet_live`: the stock AI cars (set by their
+`main_AI` scripts) and the stock SD200, SD202 and NL/NG buses, the AI SD84 among them (set by
+their `spray.osc`). They get that spray only on a road wet through (`StreetCond` 1), as in
+OMSI, and the puddles' spray on top. Spray is thrown
+within 100 m of the camera (less of it farther off), at most 1400 puffs at once; none shows
+inside the bus the camera is in.
+
 The vanilla look stays the default. The navigator (`crates/omsi-app/src/navigator.rs`) sits in a corner of the screen (lower
 left by default), after the Route Advisor of Euro Truck Simulator 2: small, dark and half
 transparent, a tilted 3D map that turns with the bus and zooms out with speed - the roads
 of the lane network, the trip's route with arrows along it, coloured stretch by stretch by
 how busy the road is (blue empty, green light, yellow busy, red heavy, dark red jammed; it
-changes as the traffic does), the stops ahead, the other vehicles as blue dots, the next
+changes as the traffic does), the stops ahead, the other vehicles as blue dots, the other
+players of a LAN session or server as purple arrows with their names (on the city map too), the next
 turn with its distance and the street it turns into, and the street the bus is on. It
 routes on the whole map's road network, read from the tile files in the background at the
 start, so the way shows however far the route or the next stop is from the loaded tiles.
@@ -444,7 +477,9 @@ A station is an MP3, AAC or Ogg stream, or an `.m3u` / `.pls` playlist that poin
 The address is the one a media player opens - on the station's website, or in a directory
 such as radio-browser.info. Streams in HE-AAC with a program config element (some `.aacp`
 stations) cannot be played. `volume` (0..1) is the radio's loudness on top of the knob.
-The file is read when the game starts.
+The file is read when the game starts. The launcher's Settings → Sound → *Radio stations*
+edits the same list: a name and an address a station, the bin removes one, *Add a station*
+adds one, saved at once (the file's comments, `volume` and frequencies stay as they are).
 
 **Stations of a radio plugin.** Stations already set up for an OMSI radio plugin (SuperRadio
 and the like) are taken over: every line with an http(s) address in the text files under
@@ -543,6 +578,7 @@ Environment variables, all off unless set. The useful ones:
 | `OMSI_NO_SHADOWS`, `OMSI_NO_CORONAS`, `OMSI_NO_ENVMAP`, `OMSI_NO_BUMP`, `OMSI_NO_CULL`, `OMSI_ENV_PHOTO=0` | leave one part of the picture out for an A/B |
 | `OMSI_NO_SURF=1` | roads without the bumps of their textures' `.surf` maps (A/B) |
 | `OMSI_NO_PUDDLE_REFLECTIONS=1` | leave wet-road scene reflections out for a screenshot or performance comparison |
+| `OMSI_NO_SPRAY=1` | leave the tyres' spray on wet roads out (A/B); `OMSI_DEBUG_RAIN=1` logs how many tyres throw water |
 | `OMSI_DEBUG_ENHANCED`, `OMSI_DEBUG_SKY`, `OMSI_DEBUG_EXPOSURE`, `OMSI_METER=…` | the enhanced renderer's lamps, sky, adaptation and metering |
 | `OMSI_DEBUG_TRAFFIC`, `OMSI_DEBUG_PAX`, `OMSI_DEBUG_PHYSICS`, `OMSI_DEBUG_LAN`, `OMSI_DEBUG_IBIS`, `OMSI_DEBUG_VARS=a,b` | why a car, a passenger, a wheel, a peer, an IBIS or a script variable does what it does |
 | `OMSI_CHECK_ROADS=1`, `OMSI_ROAD_PHOTO=1`, `OMSI_CHECK_ENTRIES=1` | walk the lanes as a bus wheel, photograph the carriageway from above, check every entry point |
@@ -554,6 +590,7 @@ Environment variables, all off unless set. The useful ones:
 | `OMSI_BACKEND=vulkan\|dx12\|gl` | the graphics interface to ask first (the log lists every adapter each one offers) |
 | `OMSI_GPU_LIMITS=default\|downlevel` | pretend the graphics card can only do this much (tests of old cards) |
 | `OMSI_GPU_ARRAYS=textures\|nostorage` | read the scene's arrays from textures, as on OpenGL chips without storage buffers in the vertex shader (or without any: no per-pixel lamp light) - tests of old cards |
+| `OMSI_GL_TEXTURE_UNITS=1` | with `OMSI_GPU_ARRAYS`, keep to the sixteen texture units OpenGL has there, as such a chip does: the enhanced graphics are left out (vanilla+ is drawn) |
 | `OMSI_RENDER_OCCLUDED=1` | draw even while the window is hidden (tests) |
 | `OMSI_CHECK_OBSTACLES=1` | offscreen: drive every lane as a bus and list the objects that would stop it |
 | `OMSI_DEBUG_REPEATERS=1` | list the spline object rows whose start the map and the spline chain disagree about |
