@@ -10614,6 +10614,12 @@ pub struct VehicleRender {
     pub own_materials: Vec<MaterialId>,
     /// The shared set it is drawn with (None for the player's own).
     pub set: Option<VehicleKey>,
+    /// The set it owns alone, when it is not drawn with a shared one (the player's vehicle
+    /// and its coupled parts): what it took of the shared textures and meshes, given back by
+    /// `release_vehicle`. Without it nothing ever gave those back - the player's bus held
+    /// them for the whole session, so reading it again picked its old textures and meshes out
+    /// of the cache and every reload lost the memory of the one before (see `crate::devmode`).
+    pub own_set: Option<Box<VehicleSet>>,
     /// `[matl_change]` / `[texchanges]` slots whose material a variable switches.
     pub variants: Vec<VariantSlot>,
     /// GPU texture per `[texttexture]` index.
@@ -11280,6 +11286,7 @@ impl World {
         let set = self.upload_vehicle(renderer, scene, vt, scheme);
         let mut render = self.instantiate_vehicle(renderer, scene, vt, &set, None, None);
         own_skinned_meshes(renderer, scene, vt, &mut render);
+        render.own_set = Some(Box::new(set));
         render
     }
 
@@ -11303,6 +11310,7 @@ impl World {
         };
         let mut render = self.instantiate_vehicle(renderer, scene, vt, &set, None, shared);
         own_skinned_meshes(renderer, scene, vt, &mut render);
+        render.own_set = Some(Box::new(set));
         render
     }
 
@@ -11522,6 +11530,44 @@ impl World {
                 if s.users == 0 {
                     s.idle_since = Some(std::time::Instant::now());
                 }
+            }
+        }
+        // a set of its own goes with it, the way `trim_vehicle_sets` lets a shared one go:
+        // its materials, and the textures and meshes no other set still holds
+        if let Some(set) = render.own_set {
+            self.release_own_set(renderer, scene, *set);
+        }
+    }
+
+    /// The textures, meshes and materials of a set nobody else is drawn with. The counts are
+    /// the shared ones' (`vehicle_textures`, `vehicle_meshes`): what another set still holds
+    /// stays, what falls to nobody is freed and taken out of the cache - so the next read of
+    /// those files reads them from the disk again.
+    fn release_own_set(&self, renderer: &Renderer, scene: &mut Scene, set: VehicleSet) {
+        let mut tex_ids = self.vehicle_textures.lock();
+        let mut mesh_ids = self.vehicle_meshes.lock();
+        let mut gpu = self.gpu.lock();
+        for m in set.materials {
+            gpu.free_material(renderer, scene, m);
+        }
+        for p in set.textures {
+            let Some(e) = tex_ids.get_mut(&p) else { continue };
+            e.1 = e.1.saturating_sub(1);
+            if e.1 == 0 {
+                let id = e.0;
+                tex_ids.remove(&p);
+                renderer.free_texture(scene, id);
+                gpu.free_textures.push(id);
+            }
+        }
+        for mk in set.mesh_keys {
+            let Some(e) = mesh_ids.get_mut(&mk) else { continue };
+            e.1 = e.1.saturating_sub(1);
+            if e.1 == 0 {
+                let id = e.0;
+                mesh_ids.remove(&mk);
+                renderer.free_mesh(scene, id);
+                gpu.free_meshes.push(id);
             }
         }
     }
@@ -12063,6 +12109,9 @@ impl World {
             variants,
             own_materials,
             set: key,
+            // (filled in by `add_vehicle`/`add_vehicle_part` for a vehicle with a set of
+            // its own; a shared set is given back through `set`)
+            own_set: None,
             displays_far: false,
             display_tick: 0,
             skinned: Vec::new(),
