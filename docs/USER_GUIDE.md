@@ -499,6 +499,11 @@ left. The page has three tabs (**Tab** or **PageUp/PageDown** step through them)
   from one place only, so half a bus in the content folder would hide the other half.
 * **Variable** - a script variable of the bus written by hand: its name, a value, and what it
   stands at now. The way to try what a script does without driving to the situation.
+* **Files** - what the bus is made of: the `.bus`, the model, sound, path and cabin
+  configuration, every script, constant file and variable list, and its meshes with the
+  variable that moves each - the map between a model and its scripts.
+* **Scripts** - what the compiler made of them: every error with its file, its line and OMSI's
+  own message. They only ever went into the log before.
 * **World** - the traffic, the passengers and the clock speed as they stand, the next weather,
   and the way to the full weather and time pages.
 

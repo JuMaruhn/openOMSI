@@ -149,7 +149,65 @@ pub(crate) fn pages(app: &App) -> Vec<(&'static str, Vec<(String, String)>)> {
     world.push(gl::button("Weather", "Next", "The next installed weather", "weather"));
     world.push(gl::button("Weather and time in full", "Open", "The World options, where every weather value and the clock are set", "devworld"));
 
-    vec![("Vehicle", bus), ("Variable", vars), ("World", world)]
+    vec![("Vehicle", bus), ("Variable", vars), ("Files", files(app)), ("Scripts", errors(app)), ("World", world)]
+}
+
+/// What the bus is made of: the files it was read from, and the meshes with the variable
+/// that moves each. The list a reload goes over, and the one a watch would watch.
+fn files(app: &App) -> Vec<(String, String)> {
+    let tr = |t: &str| omsi_ui::tr(t).into_owned();
+    let mut out: Vec<(String, String)> = Vec::new();
+    let Some(p) = app.player.as_ref() else { return out };
+    let (def, model) = (&p.vehicle.ty.def, &p.vehicle.ty.model);
+    let dir = def.dir().to_path_buf();
+    // (under the vehicle's own folder, which is what the rows have room for)
+    let short = |path: &Path| path.strip_prefix(&dir).unwrap_or(path).to_string_lossy().to_string();
+    let named = |rel: &Option<String>| rel.clone().unwrap_or_default();
+    out.push((gl::row(&tr("Vehicle file"), 'i', &short(&def.path), &dir.to_string_lossy(), None), "noop".into()));
+    for (what, name) in [("Model", named(&def.model)), ("Sound", named(&def.sound)), ("Paths", named(&def.paths)), ("Passenger cabin", named(&def.passenger_cabin))] {
+        if !name.trim().is_empty() {
+            out.push((gl::row(what, 'i', name.trim(), "", None), "noop".into()));
+        }
+    }
+    let list = |what: &str, files: &[std::path::PathBuf], out: &mut Vec<(String, String)>| {
+        for (i, f) in files.iter().enumerate() {
+            let label = if i == 0 { what.to_string() } else { String::new() };
+            out.push((gl::row(&label, 'i', &short(f), "", None), "noop".into()));
+        }
+    };
+    list(&tr("Scripts"), &def.scripts.scripts, &mut out);
+    list(&tr("Constants"), &def.scripts.constfiles, &mut out);
+    list(&tr("Variable lists"), &def.scripts.varlists, &mut out);
+    list(&tr("String lists"), &def.scripts.stringvarlists, &mut out);
+    // the meshes, each with the variable that moves it: the map between a model and a script
+    out.push((gl::row(&tr("Meshes"), 'i', &format!("{}", model.meshes.len()), "", None), "noop".into()));
+    for m in model.meshes.iter().filter(|m| !m.file.trim().is_empty()) {
+        let moved: Vec<&str> = m.animations.iter().map(|a| a.variable.trim()).filter(|v| !v.is_empty()).collect();
+        let value = if moved.is_empty() { tr("still") } else { moved.join(", ") };
+        out.push((gl::row(m.file.trim(), 'i', &value, "", None), "noop".into()));
+    }
+    out
+}
+
+/// What the compiler made of the scripts: every error with its file and line, as
+/// `Program::errors` collects them. They were only ever in the log before, where a developer
+/// working on a script had to go and look for them.
+fn errors(app: &App) -> Vec<(String, String)> {
+    let tr = |t: &str| omsi_ui::tr(t).into_owned();
+    let mut out: Vec<(String, String)> = Vec::new();
+    let Some(p) = app.player.as_ref() else { return out };
+    let program = &p.vehicle.ty.program;
+    if program.errors.is_empty() {
+        out.push((gl::row(&tr("Scripts"), 'i', &tr("No errors"), &tr("Every script of this bus compiled"), None), "noop".into()));
+        return out;
+    }
+    out.push((gl::row(&tr("Script errors"), 'i', &format!("{}", program.errors.len()), "", None), "noop".into()));
+    // (a bus with a broken script can have hundreds: the first of them are the ones to read)
+    for e in program.errors.iter().take(40) {
+        let file = e.file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        out.push((gl::row(&format!("{file}:{}", e.line), 'i', &e.message, &e.file.to_string_lossy(), None), "noop".into()));
+    }
+    out
 }
 
 /// Enter or leave the mode. Entering quietens the world, leaving puts it back.
